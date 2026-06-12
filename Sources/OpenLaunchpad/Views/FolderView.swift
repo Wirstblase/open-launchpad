@@ -31,6 +31,8 @@ struct FolderView: View {
                     handleBackdropDrop(providers: providers)
                     return true
                 }
+                .accessibilityLabel("Close folder")
+                .accessibilityHint("Tap or drop apps outside the folder to close it")
 
             VStack(spacing: 18) {
                 // Editable title
@@ -62,11 +64,16 @@ struct FolderView: View {
                     .onSubmit {
                         commitRename()
                     }
+                    .accessibilityLabel("Folder name")
+                    .accessibilityHint("Edit the folder name and press Return to confirm")
             } else {
                 Text(folderName)
                     .font(.system(size: 24, weight: .medium))
                     .foregroundColor(.white)
                     .onTapGesture { isRenaming = true }
+                    .accessibilityLabel(folderName)
+                    .accessibilityHint("Tap to rename folder")
+                    .accessibilityAddTraits(.isHeader)
             }
         }
         .padding(.horizontal, 14)
@@ -173,6 +180,9 @@ private struct FolderAppCell: View {
                 .lineLimit(1)
                 .frame(width: iconSize + 20)
         }
+        .accessibilityLabel(app.name)
+        .accessibilityHint("Double-tap to launch, right-click for more options")
+        .accessibilityAddTraits(.isButton)
         .onTapGesture { onLaunch() }
         .onDrag { NSItemProvider(object: app.path as NSString) }
         .contextMenu {

@@ -77,7 +77,7 @@ enum AppScanner {
         apps: [AppItem],
         layout: LayoutState
     ) -> (gridItems: [LaunchpadItem], updatedLayout: LayoutState) {
-        let appsByID = Dictionary(uniqueKeysWithValues: apps.map { ($0.id, $0) })
+        let appsByID = Dictionary(apps.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var folders = layout.folders
         var hiddenIDs = layout.hiddenAppIDs
         var orderedIDs = layout.orderedItemIDs
@@ -199,27 +199,5 @@ enum AppScanner {
             isSystemApp: isSystem,
             icon: nil // Resolved later by IconResolver + IconCache
         )
-    }
-}
-
-// MARK: - Grid Item
-
-/// Represents a single cell on the Launchpad grid — either an app or a folder.
-enum LaunchpadItem: Identifiable {
-    case app(AppItem)
-    case folder(AppFolder, [AppItem])
-
-    var id: String {
-        switch self {
-        case .app(let app): return app.id
-        case .folder(let folder, _): return "folder-\(folder.id.uuidString)"
-        }
-    }
-
-    var name: String {
-        switch self {
-        case .app(let app): return app.name
-        case .folder(let folder, _): return folder.name
-        }
     }
 }

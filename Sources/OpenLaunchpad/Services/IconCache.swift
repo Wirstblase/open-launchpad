@@ -40,7 +40,11 @@ actor IconCache {
         await withTaskGroup(of: (String, NSImage).self) { group in
             for app in apps {
                 group.addTask {
-                    let icon = IconResolver.resolveIcon(for: app, size: self.iconSize)
+                    // IconResolver.generateFallbackIcon and .resizeImage both call
+                    // NSImage.lockFocus() which MUST run on the main thread.
+                    let icon = await MainActor.run {
+                        IconResolver.resolveIcon(for: app, size: self.iconSize)
+                    }
                     return (app.id, icon)
                 }
             }

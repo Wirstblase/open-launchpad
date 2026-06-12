@@ -71,17 +71,20 @@ private final class MTApi {
 
 /// One shared callback for all devices. Routes frames through the singleton.
 private let gestureFrameCallback: MTContactCallback = { _, touchesPtr, touchCount, _, _ in
+    // Sanity bounds: touch count must be reasonable.
+    guard touchCount > 0, touchCount <= 20 else { return 0 }
     var points: [MTPoint] = []
-    if let touchesPtr = touchesPtr, touchCount > 0 {
+    if let touchesPtr = touchesPtr {
         points.reserveCapacity(Int(touchCount))
         for i in 0..<Int(touchCount) {
             let touch = touchesPtr.advanced(by: i * MTTouchLayout.stride)
             let state = touch.load(fromByteOffset: MTTouchLayout.stateOffset, as: Int32.self)
             if state == MTTouchLayout.stateTouching {
-                points.append(MTPoint(
-                    x: touch.load(fromByteOffset: MTTouchLayout.normalizedXOffset, as: Float.self),
-                    y: touch.load(fromByteOffset: MTTouchLayout.normalizedYOffset, as: Float.self)
-                ))
+                let x = touch.load(fromByteOffset: MTTouchLayout.normalizedXOffset, as: Float.self)
+                let y = touch.load(fromByteOffset: MTTouchLayout.normalizedYOffset, as: Float.self)
+                // Sanity: normalized coordinates should be roughly in [0, 1].
+                guard x >= -0.1 && x <= 1.1 && y >= -0.1 && y <= 1.1 else { continue }
+                points.append(MTPoint(x: x, y: y))
             }
         }
     }
@@ -121,11 +124,13 @@ final class GestureManager {
     private var gestureConsumed = false
     private var initialSpread: Float = 0
     private var lastTriggerTime: TimeInterval = 0
+    private var gestureStartTime: TimeInterval = 0
 
     // Tuning constants
     private let pinchInRatio: Float = 0.62
     private let spreadOutRatio: Float = 1.45
     private let triggerCooldown: TimeInterval = 0.75
+    private let gestureTimeout: TimeInterval = 5.0
 
     // MARK: Init
 
@@ -197,6 +202,7 @@ final class GestureManager {
     private func resetRecognizer() {
         stateLock.lock()
         gestureActive = false
+        gestureStartTime = 0
         gestureConsumed = false
         initialSpread = 0
         stateLock.unlock()
@@ -210,15 +216,26 @@ final class GestureManager {
 
         if touches.count >= 4 {
             let spread = averageSpread(touches)
+
+            // Timeout: reset the recognizer if the gesture has lasted too long.
+            let now = Date().timeIntervalSince1970
+            if gestureActive && now - gestureStartTime > gestureTimeout {
+                gestureActive = false
+                gestureConsumed = false
+                initialSpread = 0
+                gestureStartTime = 0
+                return
+            }
+
             if !gestureActive {
                 gestureActive = true
                 gestureConsumed = false
                 initialSpread = max(spread, 0.02)
+                gestureStartTime = now
                 return
             }
             guard !gestureConsumed else { return }
 
-            let now = Date().timeIntervalSince1970
             guard now - lastTriggerTime > triggerCooldown else { return }
 
             let ratio = spread / initialSpread
@@ -234,6 +251,7 @@ final class GestureManager {
         } else if touches.count <= 2 {
             gestureActive = false
             gestureConsumed = false
+            gestureStartTime = 0
         }
     }
 

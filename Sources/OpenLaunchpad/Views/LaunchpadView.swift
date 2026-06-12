@@ -32,6 +32,16 @@ struct LaunchpadView: View {
 
     private var isSearching: Bool { !searchQuery.isEmpty }
 
+    // MARK: - Cached Layout
+
+    @State private var cachedLayout: LayoutEngine.GridLayout?
+    @State private var cachedPages: [[LaunchpadItem]] = []
+
+    /// Builds a lookup dictionary from all scanned apps for folder preview rendering.
+    private var appLookup: [String: AppItem] {
+        Dictionary(uniqueKeysWithValues: allApps.map { ($0.id, $0) })
+    }
+
     private var displayItems: [LaunchpadItem] {
         guard isSearching else { return gridItems }
         let q = searchQuery.lowercased().trimmingCharacters(in: .whitespaces)
@@ -41,8 +51,8 @@ struct LaunchpadView: View {
     var body: some View {
         GeometryReader { geo in
             let sw = geo.size.width
-            let layout = LayoutEngine.layout(screenWidth: sw, screenHeight: geo.size.height, itemCount: displayItems.count)
-            let pages = chunked(items: displayItems, size: layout.itemsPerPage)
+            let layout = cachedLayout ?? LayoutEngine.layout(screenWidth: sw, screenHeight: geo.size.height, itemCount: displayItems.count)
+            let pages = cachedPages.isEmpty ? chunked(items: displayItems, size: layout.itemsPerPage) : cachedPages
 
             ZStack {
                 // Blurred background
@@ -107,10 +117,17 @@ struct LaunchpadView: View {
             .onReceive(NotificationCenter.default.publisher(for: .launchpadKeyDown)) { n in handleKeyPress(n, layout: layout) }
             .onReceive(NotificationCenter.default.publisher(for: .launchpadAppsChanged)) { _ in Task { await loadApps() } }
             .onReceive(NotificationCenter.default.publisher(for: .launchpadWillOpen)) { _ in
-                searchQuery = ""; isAnimatingIn = false; isAnimatingOut = false
+                searchQuery = ""; isAnimatingIn = false; isAnimatingOut = false; cachedLayout = nil; cachedPages = []
                 withAnimation(.easeOut(duration: 0.35)) { isAnimatingIn = true }
             }
             .onAppear { withAnimation(.easeOut(duration: 0.35)) { isAnimatingIn = true } }
+            .onChange(of: geo.size.width) { _, newWidth in
+                let newLayout = LayoutEngine.layout(screenWidth: newWidth, screenHeight: geo.size.height, itemCount: displayItems.count)
+                if cachedLayout?.columns != newLayout.columns || cachedLayout?.iconSize != newLayout.iconSize {
+                    cachedLayout = newLayout
+                    cachedPages = chunked(items: displayItems, size: newLayout.itemsPerPage)
+                }
+            }
             .task { await loadApps() }
         }
     }
@@ -168,6 +185,7 @@ struct LaunchpadView: View {
                 ForEach(Array(displayItems.enumerated()), id: \.element.id) { i, item in
                     AppIconView(item: item, iconSize: layout.iconSize, isFocused: focusedIndex == i,
                         isJiggling: false, isMergeTarget: false, showLabels: true,
+                        appLookup: appLookup,
                         onTap: { if case .app(let a) = item { launchApp(a) } },
                         onLongPress: {})
                 }
@@ -191,6 +209,7 @@ struct LaunchpadView: View {
                         AppIconView(item: item, iconSize: layout.iconSize,
                             isFocused: currentPage == pi && focusedIndex == gi,
                             isJiggling: isJiggling, isMergeTarget: target, showLabels: true,
+                            appLookup: appLookup,
                             onTap: { if isJiggling { return }; launchItem(item) },
                             onLongPress: { withAnimation(.easeOut(duration: 0.25)) { isJiggling = true } }
                         )
@@ -245,12 +264,12 @@ struct LaunchpadView: View {
     private func startEdgeMonitor(sw: CGFloat, pageCount: Int) {
         stopEdgeMonitor(); lastEdgeFlipTime = .distantPast
         edgeFlipTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
-            guard draggedItemID != nil, expandedFolder == nil else { return }
-            guard Date().timeIntervalSince(lastEdgeFlipTime) >= 0.8 else { return }
-            guard let w = NSApp.windows.first(where: { $0.isVisible && $0.level == .statusBar }) else { return }
+            guard self.draggedItemID != nil, self.expandedFolder == nil else { return }
+            guard Date().timeIntervalSince(self.lastEdgeFlipTime) >= 0.8 else { return }
+            guard let w = NSApp.windows.first(where: { $0.isVisible && $0.level == .modalPanel }) else { return }
             let mx = NSEvent.mouseLocation.x; let f = w.frame
-            if mx <= f.minX + 44, currentPage > 0 { lastEdgeFlipTime = Date(); currentPage -= 1; focusedIndex = nil }
-            else if mx >= f.maxX - 44, currentPage < pageCount - 1 { lastEdgeFlipTime = Date(); currentPage += 1; focusedIndex = nil }
+            if mx <= f.minX + 44, self.currentPage > 0 { self.lastEdgeFlipTime = Date(); self.currentPage -= 1; self.focusedIndex = nil }
+            else if mx >= f.maxX - 44, self.currentPage < pageCount - 1 { self.lastEdgeFlipTime = Date(); self.currentPage += 1; self.focusedIndex = nil }
         }
         RunLoop.main.add(edgeFlipTimer!, forMode: .common)
     }
@@ -341,18 +360,18 @@ struct LaunchpadView: View {
 
     private func handleKeyPress(_ n: Notification, layout: LayoutEngine.GridLayout) {
         guard let kc = n.userInfo?["keyCode"] as? UInt16 else { return }
-        if kc == 36, isSearching { if let f = displayItems.first, case .app(let a) = f { launchApp(a) }; return }
+        if kc == NavKeyCode.return.rawValue, isSearching { if let f = displayItems.first, case .app(let a) = f { launchApp(a) }; return }
         let items = isSearching ? displayItems : LayoutEngine.itemsForPage(currentPage, items: gridItems, layout: layout)
         guard !items.isEmpty else { return }
         var i = focusedIndex ?? -1
         switch kc {
-        case 123: i = i <= 0 ? items.count - 1 : i - 1
-        case 124: i = i >= items.count - 1 ? 0 : i + 1
-        case 126: if i >= layout.columns { i -= layout.columns }
-        case 125: if i + layout.columns < items.count { i += layout.columns }
-        case 36: if let idx = focusedIndex, idx < items.count, case .app(let a) = items[idx] { launchApp(a) }; return
-        case 116: if !isSearching, currentPage > 0 { withAnimation(.easeOut(duration: 0.2)) { currentPage -= 1; focusedIndex = 0 } }; return
-        case 121: if !isSearching, currentPage < layout.pageCount - 1 { withAnimation(.easeOut(duration: 0.2)) { currentPage += 1; focusedIndex = 0 } }; return
+        case NavKeyCode.leftArrow.rawValue: i = i <= 0 ? items.count - 1 : i - 1
+        case NavKeyCode.rightArrow.rawValue: i = i >= items.count - 1 ? 0 : i + 1
+        case NavKeyCode.upArrow.rawValue: if i >= layout.columns { i -= layout.columns }
+        case NavKeyCode.downArrow.rawValue: if i + layout.columns < items.count { i += layout.columns }
+        case NavKeyCode.return.rawValue: if let idx = focusedIndex, idx < items.count, case .app(let a) = items[idx] { launchApp(a) }; return
+        case NavKeyCode.pageUp.rawValue: if !isSearching, currentPage > 0 { withAnimation(.easeOut(duration: 0.2)) { currentPage -= 1; focusedIndex = 0 } }; return
+        case NavKeyCode.pageDown.rawValue: if !isSearching, currentPage < layout.pageCount - 1 { withAnimation(.easeOut(duration: 0.2)) { currentPage += 1; focusedIndex = 0 } }; return
         default: return
         }
         focusedIndex = i

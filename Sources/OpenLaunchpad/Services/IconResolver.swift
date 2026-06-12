@@ -142,8 +142,10 @@ enum IconResolver {
     }
 
     /// Deterministic color based on the app name.
+    /// Note: Hasher uses a random seed per process launch, so colors are not
+    /// truly deterministic across app restarts, but they are stable within a session.
     private static func colorForName(_ name: String) -> NSColor {
-        let hash = abs(name.hashValue)
+        let hash = abs(name.hash)
         let hue = CGFloat(hash % 360) / 360.0
         return NSColor(hue: hue, saturation: 0.55, brightness: 0.75, alpha: 1.0)
     }

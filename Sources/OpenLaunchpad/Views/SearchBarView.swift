@@ -1,7 +1,11 @@
 import SwiftUI
 
-// MARK: - Search Bar View
+// MARK: - Search Bar View (DEPRECATED / LEGACY)
 
+/// **DEPRECATED:** This view is unused legacy code. LaunchpadView now uses its own
+/// inline search bar with `NativeSearchField` for reliable first-responder behavior.
+/// Kept for reference; may be removed in a future cleanup pass.
+///
 /// A text field styled like the classic Launchpad search bar.
 /// Appears as a capsule at the top of the screen when activated.
 struct SearchBarView: View {

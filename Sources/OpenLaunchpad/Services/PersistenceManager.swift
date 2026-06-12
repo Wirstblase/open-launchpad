@@ -6,6 +6,21 @@ import Foundation
 /// in the user's Application Support directory.
 enum PersistenceManager {
 
+    // MARK: - Schema Version
+
+    /// Bumped when the LayoutState JSON schema changes in a breaking way.
+    /// Allows future migration logic to transform older saved states.
+    static let schemaVersion = 1
+
+    // MARK: - Wrapper
+
+    /// Wrapper struct that embeds the layout state alongside a schema version,
+    /// so the decoded file can be validated and migrated if necessary.
+    private struct LayoutStateWrapper: Codable {
+        let schemaVersion: Int
+        let state: LayoutState
+    }
+
     // MARK: - File Location
 
     private static var storageURL: URL {
@@ -24,13 +39,28 @@ enum PersistenceManager {
 
     // MARK: - Public API
 
+    /// Serial queue for thread-safe writes.
+    private static let saveQueue = DispatchQueue(label: "com.openlaunchpad.persistence")
+
     /// Loads the saved layout state, or returns a default empty state.
+    /// If the file was written with an older schema version, migration can be
+    /// applied here in the future.
     static func load() -> LayoutState {
         guard let data = try? Data(contentsOf: storageURL) else {
             return .default
         }
         do {
             let decoder = JSONDecoder()
+            // First attempt: decode with schema wrapper (v1+ format).
+            if let wrapper = try? decoder.decode(LayoutStateWrapper.self, from: data) {
+                if wrapper.schemaVersion == schemaVersion {
+                    return wrapper.state
+                }
+                // Future: migrate older schema versions here.
+                print("[OpenLaunchpad] Unknown schema version \(wrapper.schemaVersion), loading as default.")
+                return .default
+            }
+            // Fallback: decode legacy unwrapped format (pre-schema-versioning).
             return try decoder.decode(LayoutState.self, from: data)
         } catch {
             print("[OpenLaunchpad] Failed to decode layout state: \(error.localizedDescription)")
@@ -40,15 +70,18 @@ enum PersistenceManager {
         }
     }
 
-    /// Saves the layout state to disk.
+    /// Saves the layout state to disk. Safe to call from any thread.
     static func save(_ state: LayoutState) {
-        do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(state)
-            try data.write(to: storageURL, options: .atomic)
-        } catch {
-            print("[OpenLaunchpad] Failed to save layout state: \(error.localizedDescription)")
+        let wrapper = LayoutStateWrapper(schemaVersion: schemaVersion, state: state)
+        saveQueue.async {
+            do {
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                let data = try encoder.encode(wrapper)
+                try data.write(to: storageURL, options: .atomic)
+            } catch {
+                print("[OpenLaunchpad] Failed to save layout state: \(error.localizedDescription)")
+            }
         }
     }
 

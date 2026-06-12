@@ -12,25 +12,35 @@ struct AppIconView: View {
     let isJiggling: Bool
     let isMergeTarget: Bool
     let showLabels: Bool
+    let appLookup: [String: AppItem]
     let onTap: () -> Void
     let onLongPress: () -> Void
 
     @State private var resolvedIcon: NSImage?
+    @State private var jiggleAngleDegrees: Double = 0
+
+    // MARK: - Layout Constants
+
+    private var labelSpacing: CGFloat { 6 }
+    private var iconCornerRadius: CGFloat { iconSize * 0.225 }
+    private var labelFrameHeight: CGFloat { 28 }
+    private var labelWidthOffset: CGFloat { 20 }
+    private var deleteBadgeSize: CGFloat { 20 }
 
     var body: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: labelSpacing) {
             // Icon
             ZStack(alignment: .topLeading) {
                 iconContent
 
                 // Focus ring (keyboard navigation)
-                RoundedRectangle(cornerRadius: iconSize * 0.225 + 2)
+                RoundedRectangle(cornerRadius: iconCornerRadius + 2)
                     .stroke(Color.blue.opacity(0.85), lineWidth: 3)
                     .frame(width: iconSize + 6, height: iconSize + 6)
                     .opacity(isFocused ? 1.0 : 0.0)
 
                 // Merge target glow (dragging app onto this one for folder creation)
-                RoundedRectangle(cornerRadius: iconSize * 0.225 + 3)
+                RoundedRectangle(cornerRadius: iconCornerRadius + 3)
                     .stroke(Color.green.opacity(0.85), lineWidth: 3)
                     .frame(width: iconSize + 8, height: iconSize + 8)
                     .scaleEffect(1.12)
@@ -50,21 +60,25 @@ struct AppIconView: View {
                 .foregroundColor(.white)
                 .multilineTextAlignment(.center)
                 .lineLimit(2)
-                .frame(height: 28, alignment: .top)
+                .frame(height: labelFrameHeight, alignment: .top)
                 .shadow(color: .black.opacity(0.6), radius: 2, x: 0, y: 1)
                 .opacity(showLabels ? 1.0 : 0.0)
         }
-        .frame(width: iconSize + 20)
+        .frame(width: iconSize + labelWidthOffset)
         .contentShape(Rectangle())
         .accessibilityLabel("\(item.name), \(item.id.hasPrefix("folder-") ? "Folder" : "Application")")
+        .accessibilityHint(item.id.hasPrefix("folder-") ? "Double-tap to open folder" : "Double-tap to launch application")
         .accessibilityAddTraits(.isButton)
-        .rotationEffect(isJiggling ? jiggleAngle : .zero)
-        .animation(
-            isJiggling
-                ? Animation.easeInOut(duration: 0.15).repeatForever(autoreverses: true)
-                : .default,
-            value: isJiggling
-        )
+        .rotationEffect(.degrees(jiggleAngleDegrees))
+        .onChange(of: isJiggling) { _, jiggling in
+            if !jiggling { jiggleAngleDegrees = 0 }
+        }
+        .onReceive(Timer.publish(every: 1.0/60.0, on: .main, in: .common).autoconnect()) { date in
+            guard isJiggling else { return }
+            let hash = abs(item.id.hashValue)
+            let phase = Double(hash % 100) / 100.0 * .pi * 2
+            jiggleAngleDegrees = sin(date.timeIntervalSinceReferenceDate * 6 + phase) * 1.5
+        }
         // Tap
         .simultaneousGesture(
             TapGesture().onEnded {
@@ -97,7 +111,7 @@ struct AppIconView: View {
                 .resizable()
                 .frame(width: iconSize, height: iconSize)
         } else {
-            RoundedRectangle(cornerRadius: iconSize * 0.225)
+            RoundedRectangle(cornerRadius: iconCornerRadius)
                 .fill(Color.white.opacity(0.12))
                 .frame(width: iconSize, height: iconSize)
         }
@@ -112,7 +126,7 @@ struct AppIconView: View {
                 ZStack {
                     Circle()
                         .fill(Color.white)
-                        .frame(width: 20, height: 20)
+                        .frame(width: deleteBadgeSize, height: deleteBadgeSize)
                     Image(systemName: "xmark")
                         .font(.system(size: 9, weight: .bold))
                         .foregroundColor(.black)
@@ -124,16 +138,6 @@ struct AppIconView: View {
         .onTapGesture {
             // Phase 4: hide app from Launchpad
         }
-    }
-
-    // MARK: - Jiggle Angle
-
-    /// Each icon gets a slightly different jiggle phase based on its ID hash.
-    private var jiggleAngle: Angle {
-        let hash = abs(item.id.hashValue)
-        let phase = Double(hash % 100) / 100.0 * .pi * 2
-        let amplitude: Double = 1.5
-        return .degrees(sin(Date().timeIntervalSinceReferenceDate * 6 + phase) * amplitude)
     }
 
     // MARK: - Icon Resolution
@@ -175,8 +179,8 @@ struct AppIconView: View {
             let y = pad + (2 - row) * (mini + gap)  // top-to-bottom
             let rect = NSRect(x: x, y: y, width: mini, height: mini)
 
-            // Try to load cached icon for the app
-            if let app = folderApp(for: folder.appIDs[i]) {
+            // Look up app in the provided dictionary
+            if let app = appLookup[folder.appIDs[i]] {
                 let icon = await IconCache.shared.icon(for: app)
                 icon.draw(in: rect)
             }
@@ -186,11 +190,5 @@ struct AppIconView: View {
         return image
     }
 
-    /// Looks up an AppItem by ID from a quick scan. Inefficient but called rarely.
-    private func folderApp(for appID: String) -> AppItem? {
-        // We can't easily look this up without access to all apps.
-        // The caller should provide the app list. For now, return nil.
-        // Phase 4 refinement: pass app lookup dictionary.
-        nil
-    }
+
 }

@@ -58,6 +58,9 @@ final class HotkeyManager {
 
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandlerRef: EventHandlerRef?
+    /// Retained while the Carbon event handler is installed to prevent deallocation
+    /// while the handler can still fire. Released in removeHandler().
+    private var selfRetainer: Unmanaged<HotkeyManager>?
     private let onTrigger: () -> Void
 
     // MARK: - Init
@@ -106,14 +109,15 @@ final class HotkeyManager {
         let handler: EventHandlerUPP = { _, _, userData in
             if let userData = userData {
                 let manager = Unmanaged<HotkeyManager>.fromOpaque(userData).takeUnretainedValue()
-                DispatchQueue.main.async {
-                    manager.onTrigger()
-                }
+                // Carbon event handlers already run on the main thread.
+                manager.onTrigger()
             }
             return noErr
         }
 
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+        let retained = Unmanaged.passRetained(self)
+        selfRetainer = retained
+        let selfPtr = retained.toOpaque()
         let status = InstallEventHandler(
             GetApplicationEventTarget(),
             handler,
@@ -139,5 +143,8 @@ final class HotkeyManager {
             RemoveEventHandler(ref)
             eventHandlerRef = nil
         }
+        // Release the retained self now that the handler is removed.
+        selfRetainer?.release()
+        selfRetainer = nil
     }
 }

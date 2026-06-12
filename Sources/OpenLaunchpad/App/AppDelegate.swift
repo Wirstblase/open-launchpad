@@ -1,11 +1,6 @@
 import Cocoa
 import SwiftUI
 
-final class LaunchpadWindow: NSWindow {
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
-}
-
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private var window: LaunchpadWindow?
@@ -51,7 +46,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = false
-        window.level = .statusBar
+        // .screenSaver covers the menu bar and Dock (like real Launchpad).
+        // .fullScreenAuxiliary keeps it well-behaved with Mission Control & Stage Manager.
+        window.level = .screenSaver
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         window.ignoresMouseEvents = false
         window.delegate = self
@@ -66,13 +63,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: - Key Monitor
 
     private func setupKeyMonitor() {
-        let navKeyCodes: Set<UInt16> = [123, 124, 125, 126, 36, 116, 121]
+        let navKeyCodes: Set<UInt16> = [
+            NavKeyCode.leftArrow.rawValue,
+            NavKeyCode.rightArrow.rawValue,
+            NavKeyCode.downArrow.rawValue,
+            NavKeyCode.upArrow.rawValue,
+            NavKeyCode.return.rawValue,
+            NavKeyCode.pageUp.rawValue,
+            NavKeyCode.pageDown.rawValue,
+        ]
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self = self, self.window?.isVisible == true else { return event }
             if let fr = self.window?.firstResponder, fr is NSTextView || fr is NSTextField {
                 return event
             }
-            if event.keyCode == 53 {
+            if event.keyCode == NavKeyCode.escape.rawValue {
                 NotificationCenter.default.post(name: .launchpadEscapePressed, object: nil)
                 return nil
             }
@@ -138,7 +143,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: - Window Delegate
 
     func windowDidResignKey(_ notification: Notification) {
-        if window?.isVisible == true { hideLaunchpad() }
+        // Only hide if another app (not a system panel) became frontmost.
+        // This prevents the launchpad from vanishing when system dialogs,
+        // Notification Center, or Stage Manager temporarily steal focus.
+        guard window?.isVisible == true else { return }
+        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier != Bundle.main.bundleIdentifier {
+            hideLaunchpad()
+        }
     }
 
     // MARK: - Helpers
@@ -152,47 +163,4 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 }
 
-// MARK: - Notification Names
 
-extension Notification.Name {
-    static let launchpadWillOpen = Notification.Name("OpenLaunchpadWillOpen")
-    static let launchpadDidClose = Notification.Name("OpenLaunchpadDidClose")
-    static let launchpadCloseRequested = Notification.Name("OpenLaunchpadCloseRequested")
-    static let launchpadEscapePressed = Notification.Name("OpenLaunchpadEscapePressed")
-    static let launchpadKeyDown = Notification.Name("OpenLaunchpadKeyDown")
-    static let launchpadAlphaNumericTyped = Notification.Name("OpenLaunchpadAlphaNumericTyped")
-    static let launchpadAppsChanged = Notification.Name("OpenLaunchpadAppsChanged")
-}
-
-// MARK: - App Directory Watcher
-
-final class AppDirectoryWatcher {
-    private let onChanged: () -> Void
-    private var stream: FSEventStreamRef?
-    private var debounceWorkItem: DispatchWorkItem?
-
-    init(onChanged: @escaping () -> Void) { self.onChanged = onChanged }
-
-    func start() {
-        guard stream == nil else { return }
-        let paths = ["/Applications", "/Applications/Utilities", "/System/Applications", NSHomeDirectory() + "/Applications"] as CFArray
-        var ctx = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(), retain: nil, release: nil, copyDescription: nil)
-        let cb: FSEventStreamCallback = { _, info, _, _, _, _ in
-            guard let info = info else { return }
-            Unmanaged<AppDirectoryWatcher>.fromOpaque(info).takeUnretainedValue().scheduleNotify()
-        }
-        stream = FSEventStreamCreate(kCFAllocatorDefault, cb, &ctx, paths, FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 2.0, FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents))
-        if let s = stream { FSEventStreamSetDispatchQueue(s, DispatchQueue.main); FSEventStreamStart(s) }
-    }
-
-    func stop() {
-        if let s = stream { FSEventStreamStop(s); FSEventStreamInvalidate(s); FSEventStreamRelease(s); stream = nil }
-    }
-
-    private func scheduleNotify() {
-        debounceWorkItem?.cancel()
-        let w = DispatchWorkItem { [weak self] in self?.onChanged() }
-        debounceWorkItem = w
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: w)
-    }
-}
