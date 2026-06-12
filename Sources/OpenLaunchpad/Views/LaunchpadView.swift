@@ -94,6 +94,7 @@ struct LaunchpadView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .contentShape(Rectangle())
+                    .contentShape(Rectangle())
                     .onTapGesture {
                         if expandedFolder != nil { closeFolder() }
                         else if isSearching { searchQuery = "" }
@@ -114,6 +115,7 @@ struct LaunchpadView: View {
             .opacity(isAnimatingOut ? 0.0 : (isAnimatingIn ? (expandedFolder != nil ? 0.4 : 1.0) : 0.0))
             .scaleEffect(isAnimatingOut ? 1.10 : (isAnimatingIn ? 1.0 : 1.10))
             .onReceive(NotificationCenter.default.publisher(for: .launchpadEscapePressed)) { _ in handleEscape() }
+            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("OpenLaunchpadDismissRequested"))) { _ in animateOut() }
             .onReceive(NotificationCenter.default.publisher(for: .launchpadKeyDown)) { n in handleKeyPress(n, layout: layout) }
             .onReceive(NotificationCenter.default.publisher(for: .launchpadAppsChanged)) { _ in Task { await loadApps() } }
             .onReceive(NotificationCenter.default.publisher(for: .launchpadWillOpen)) { _ in
@@ -350,8 +352,9 @@ struct LaunchpadView: View {
     }
 
     private func animateOut() {
-        withAnimation(.easeOut(duration: 0.25)) { isAnimatingOut = true }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+        withAnimation(.easeOut(duration: 0.22)) { isAnimatingOut = true }
+        // After SwiftUI icons zoom out, do AppKit window fade via dismissAction
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
             dismissAction()
         }
     }

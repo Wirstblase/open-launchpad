@@ -48,13 +48,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.hasShadow = false
         // .screenSaver covers the menu bar and Dock (like real Launchpad).
         // .fullScreenAuxiliary keeps it well-behaved with Mission Control & Stage Manager.
-        window.level = .screenSaver
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+        window.level = .statusBar
+        window.collectionBehavior = [.fullScreenAuxiliary, .ignoresCycle]
         window.ignoresMouseEvents = false
         window.delegate = self
 
         let launchpadView = LaunchpadView(dismissAction: { [weak self] in
-            self?.hideLaunchpad()
+            // Animate window alpha out, then hide
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.2
+                self?.window?.animator().alphaValue = 0
+            } completionHandler: {
+                self?.hideLaunchpad()
+                self?.window?.animator().alphaValue = 1.0
+            }
         })
         window.contentView = NSHostingView(rootView: launchpadView)
         self.window = window
@@ -125,6 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let window = window else { return }
         let screenFrame = targetScreenFrame()
         window.setFrame(screenFrame, display: true)
+        window.alphaValue = 1.0
         NotificationCenter.default.post(name: .launchpadWillOpen, object: nil)
         window.orderFront(nil)
         window.makeKey()
@@ -143,12 +151,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: - Window Delegate
 
     func windowDidResignKey(_ notification: Notification) {
-        // Only hide if another app (not a system panel) became frontmost.
-        // This prevents the launchpad from vanishing when system dialogs,
-        // Notification Center, or Stage Manager temporarily steal focus.
         guard window?.isVisible == true else { return }
         if NSWorkspace.shared.frontmostApplication?.bundleIdentifier != Bundle.main.bundleIdentifier {
-            hideLaunchpad()
+            // Route through the view's animateOut() for icon zoom-out
+            NotificationCenter.default.post(name: Notification.Name("OpenLaunchpadDismissRequested"), object: nil)
         }
     }
 

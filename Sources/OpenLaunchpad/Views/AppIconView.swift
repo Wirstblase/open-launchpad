@@ -30,7 +30,7 @@ struct AppIconView: View {
     var body: some View {
         VStack(spacing: labelSpacing) {
             // Icon
-            ZStack(alignment: .topLeading) {
+            ZStack(alignment: .center) {
                 iconContent
 
                 // Focus ring (keyboard navigation)
@@ -60,7 +60,7 @@ struct AppIconView: View {
                 .foregroundColor(.white)
                 .multilineTextAlignment(.center)
                 .lineLimit(2)
-                .frame(height: labelFrameHeight, alignment: .top)
+                .frame(width: iconSize + labelWidthOffset, height: labelFrameHeight, alignment: .top)
                 .shadow(color: .black.opacity(0.6), radius: 2, x: 0, y: 1)
                 .opacity(showLabels ? 1.0 : 0.0)
         }
@@ -109,6 +109,7 @@ struct AppIconView: View {
         if let icon = resolvedIcon {
             Image(nsImage: icon)
                 .resizable()
+                .aspectRatio(contentMode: .fit)
                 .frame(width: iconSize, height: iconSize)
         } else {
             RoundedRectangle(cornerRadius: iconCornerRadius)
