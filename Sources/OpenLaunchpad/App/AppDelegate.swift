@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupWindow()
         setupKeyMonitor()
+        setupMouseHoldMonitor()
         setupHotkey()
         setupGestures()
         setupAppWatcher()
@@ -68,6 +69,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     // MARK: - Key Monitor
+
+    // MARK: - Mouse Hold (Long Press) Monitor
+
+    /// Shared reference to the current grid layout, updated by LaunchpadView.
+    /// Used to determine if a mouse hold is over an actual icon.
+    static var currentGridLayoutInfo: GridLayoutInfo?
+
+    struct GridLayoutInfo {
+        let items: [(id: String, frame: CGRect)]
+        let isVisible: Bool
+    }
+
+    private var mouseHoldTimer: Timer?
+
+    private func setupMouseHoldMonitor() {
+        NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            guard let self = self, let window = self.window, window.isVisible else { return event }
+            guard let layout = AppDelegate.currentGridLayoutInfo, layout.isVisible else { return event }
+
+            let loc = event.locationInWindow
+            let windowH = window.contentLayoutRect.height
+
+            // Quick Y-bound check
+            guard loc.y >= 100 && loc.y <= windowH - 40 else { return event }
+
+            // Only trigger if mouse is over an actual icon cell
+            let hitIcon = layout.items.contains { $0.frame.contains(loc) }
+            guard hitIcon else { return event }
+
+            self.mouseHoldTimer?.invalidate()
+            let timer = Timer(timeInterval: 0.5, repeats: false) { _ in
+                NotificationCenter.default.post(
+                    name: Notification.Name("OpenLaunchpadLongPress"), object: nil)
+            }
+            // .common includes .eventTracking so the timer fires even while mouse is held down
+            RunLoop.main.add(timer, forMode: .common)
+            self.mouseHoldTimer = timer
+            return event
+        }
+
+        NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+            self?.mouseHoldTimer?.invalidate()
+            self?.mouseHoldTimer = nil
+            return event
+        }
+    }
 
     private func setupKeyMonitor() {
         let navKeyCodes: Set<UInt16> = [

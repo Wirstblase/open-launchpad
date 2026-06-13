@@ -188,18 +188,19 @@ private struct FolderAppCell: View {
         .accessibilityHint("Tap to launch, drag outside the panel to remove from folder")
         .accessibilityAddTraits(.isButton)
         .onTapGesture { onLaunch() }
-        .gesture(
-            DragGesture(minimumDistance: 8, coordinateSpace: .local)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 5, coordinateSpace: .global)
                 .onChanged { value in
-                    isDragging = true
+                    if !isDragging {
+                        isDragging = true
+                    }
                     dragOffset = value.translation
                 }
                 .onEnded { value in
                     isDragging = false
-                    // If dragged far enough outward, remove from folder
                     let dist = sqrt(pow(value.translation.width, 2) + pow(value.translation.height, 2))
-                    if dist > iconSize * 2.5 {
-                        withAnimation(.easeOut(duration: 0.2)) { dragOffset = .zero }
+                    if dist > iconSize * 1.3 {
+                        dragOffset = .zero
                         onRemove()
                     } else {
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { dragOffset = .zero }

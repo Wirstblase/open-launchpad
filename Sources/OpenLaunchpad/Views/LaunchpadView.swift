@@ -130,6 +130,9 @@ struct LaunchpadView: View {
             }
             .opacity(isAnimatingOut ? 0.0 : (isAnimatingIn ? 1.0 : 0.0))
             .scaleEffect(isAnimatingOut ? 1.10 : (isAnimatingIn ? 1.0 : 1.10))
+            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("OpenLaunchpadLongPress"))) { _ in
+                withAnimation(.easeOut(duration: 0.25)) { isJiggling = true }
+            }
             .onReceive(NotificationCenter.default.publisher(for: .launchpadEscapePressed)) { _ in handleEscape() }
 
             .onReceive(NotificationCenter.default.publisher(for: Notification.Name("OpenLaunchpadDismissRequested"))) { _ in animateOut() }
@@ -216,6 +219,9 @@ struct LaunchpadView: View {
 
     private func pageGrid(pages: [[LaunchpadItem]], layout: LayoutEngine.GridLayout, sw: CGFloat) -> some View {
         let cols = Array(repeating: GridItem(.fixed(layout.iconSize + 20), spacing: layout.columnSpacing), count: layout.columns)
+
+        // Publish grid item frames for hit-testing in long-press monitor
+        publishGridFrames(pages: pages, layout: layout, sw: sw)
 
         return HStack(alignment: .top, spacing: 0) {
             ForEach(0..<pages.count, id: \.self) { pi in
@@ -525,15 +531,46 @@ struct LaunchpadView: View {
         }
         saveLayout()
 
-        // Auto-open the newly created folder
+        // Auto-open the newly created folder and exit edit mode
         if let fid = newFolderID,
            let createdFolder = fm[fid] {
             let folderApps = createdFolder.appIDs.compactMap { appLookup[$0] }
             withAnimation(.easeOut(duration: 0.3)) {
+                isJiggling = false
                 expandedFolder = createdFolder
                 expandedFolderApps = folderApps
             }
         }
+    }
+
+    // MARK: - Grid Frames for Hit-Testing
+
+    private func publishGridFrames(pages: [[LaunchpadItem]], layout: LayoutEngine.GridLayout, sw: CGFloat) {
+        let cellWidth = layout.iconSize + 20
+        let cellHeight = layout.iconSize + 34
+        let colStep = cellWidth + layout.columnSpacing
+        let rowStep = cellHeight + layout.rowSpacing
+        let totalGridWidth = CGFloat(layout.columns) * cellWidth + CGFloat(layout.columns - 1) * layout.columnSpacing
+        let xPadding = max(0, (sw - totalGridWidth) / 2)
+        let gridTop: CGFloat = 100  // search bar + spacer
+
+        var frames: [(id: String, frame: CGRect)] = []
+        for (pi, page) in pages.enumerated() {
+            for (i, item) in page.enumerated() {
+                let col = CGFloat(i % layout.columns)
+                let row = CGFloat(i / layout.columns)
+                let x = xPadding + col * colStep
+                let y = gridTop + row * rowStep
+                // Adjust for page offset (pageGrid starts at x=0 in local coords)
+                let frame = CGRect(x: x, y: y, width: cellWidth, height: cellHeight)
+                frames.append((id: item.id, frame: frame))
+            }
+        }
+
+        AppDelegate.currentGridLayoutInfo = AppDelegate.GridLayoutInfo(
+            items: frames,
+            isVisible: !isSearching && !isLoading && expandedFolder == nil
+        )
     }
 
     // MARK: - Bottom Bar
@@ -584,20 +621,59 @@ struct LaunchpadView: View {
     private func closeFolder() { withAnimation(.easeOut(duration: 0.25)) { expandedFolder = nil; expandedFolderApps = [] } }
     private func renameFolder(_ folder: AppFolder, newName: String) {
         var s = currentLayoutState()
-        if s.folders[folder.id] != nil { s.folders[folder.id]?.name = newName; PersistenceManager.save(s); if expandedFolder?.id == folder.id { expandedFolder?.name = newName }; refreshLayout() }
+        if var f = s.folders[folder.id] {
+            f.name = newName
+            s.folders[folder.id] = f
+            PersistenceManager.save(s)
+            if expandedFolder?.id == folder.id { expandedFolder?.name = newName }
+            rebuildGridFromState(s)
+            folderVersion += 1  // refresh folder icons
+        }
     }
     private func removeAppFromFolder(_ app: AppItem) {
         var s = currentLayoutState()
-        for fid in s.folders.keys { s.folders[fid]?.appIDs.removeAll { $0 == app.id } }
-        let rm = s.folders.filter { $0.value.appIDs.isEmpty }; for fid in rm.keys { s.folders.removeValue(forKey: fid) }
-        s.orderedItemIDs.removeAll { id in id.hasPrefix("folder-") && rm.keys.contains(UUID(uuidString: String(id.dropFirst(7))) ?? UUID()) }
-        PersistenceManager.save(s); refreshLayout()
+        for fid in s.folders.keys {
+            if var f = s.folders[fid] {
+                f.appIDs.removeAll { $0 == app.id }
+                s.folders[fid] = f
+            }
+        }
+        let rm = s.folders.filter { $0.value.appIDs.isEmpty }
+        for fid in rm.keys { s.folders.removeValue(forKey: fid) }
+        s.orderedItemIDs.removeAll { id in
+            id.hasPrefix("folder-") && rm.keys.contains(UUID(uuidString: String(id.dropFirst(7))) ?? UUID())
+        }
+        // Add the removed app back as a standalone item at the end
+        if !s.orderedItemIDs.contains(app.id) {
+            s.orderedItemIDs.append(app.id)
+        }
+        PersistenceManager.save(s)
+        rebuildGridFromState(s)
+        folderVersion += 1  // refresh folder icons
         if let ef = expandedFolder, rm.keys.contains(ef.id) { closeFolder() }
         else if let ef = expandedFolder, let u = s.folders[ef.id] {
             expandedFolder = u
-            let apps = allApps
-            expandedFolderApps = u.appIDs.compactMap { aid in apps.first(where: { $0.id == aid }) }
+            expandedFolderApps = u.appIDs.compactMap { aid in allApps.first(where: { $0.id == aid }) }
         }
+    }
+
+    /// Rebuilds gridItems from a LayoutState (bypasses disk I/O).
+    private func rebuildGridFromState(_ state: LayoutState) {
+        let appsByID = Dictionary(allApps.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var items: [LaunchpadItem] = []
+        for id in state.orderedItemIDs {
+            if id.hasPrefix("folder-"),
+               let fid = UUID(uuidString: String(id.dropFirst("folder-".count))),
+               let f = state.folders[fid] {
+                let folderApps = f.appIDs.compactMap { appsByID[$0] }
+                if !folderApps.isEmpty {
+                    items.append(.folder(f, folderApps))
+                }
+            } else if let app = appsByID[id] {
+                items.append(.app(app))
+            }
+        }
+        withAnimation(.easeOut(duration: 0.2)) { gridItems = items }
     }
 
     // MARK: - Escape

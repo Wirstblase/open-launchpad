@@ -70,10 +70,10 @@ enum PersistenceManager {
         }
     }
 
-    /// Saves the layout state to disk. Safe to call from any thread.
+    /// Saves the layout state to disk synchronously. Safe to call from any thread.
     static func save(_ state: LayoutState) {
         let wrapper = LayoutStateWrapper(schemaVersion: schemaVersion, state: state)
-        saveQueue.async {
+        saveQueue.sync {
             do {
                 let encoder = JSONEncoder()
                 encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

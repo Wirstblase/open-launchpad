@@ -74,11 +74,6 @@ struct AppIconView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { isPressed = false }
             onTap()
         }
-        // Long press to enter edit mode
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.5)
-                .onEnded { _ in onLongPress() }
-        )
         // Drag to move icons (only useful in edit mode; ignored when not jiggling)
         .onDrag {
             NSItemProvider(object: item.id as NSString)
