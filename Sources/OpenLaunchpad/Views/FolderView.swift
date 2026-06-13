@@ -158,6 +158,8 @@ private struct FolderAppCell: View {
     let onRemove: () -> Void
 
     @State private var resolvedIcon: NSImage?
+    @State private var dragOffset: CGSize = .zero
+    @State private var isDragging = false
 
     var body: some View {
         VStack(spacing: 6) {
@@ -180,11 +182,30 @@ private struct FolderAppCell: View {
                 .lineLimit(1)
                 .frame(width: iconSize + 20)
         }
+        .opacity(isDragging ? 0.3 : 1.0)
+        .offset(dragOffset)
         .accessibilityLabel(app.name)
-        .accessibilityHint("Double-tap to launch, right-click for more options")
+        .accessibilityHint("Tap to launch, drag outside the panel to remove from folder")
         .accessibilityAddTraits(.isButton)
         .onTapGesture { onLaunch() }
-        .onDrag { NSItemProvider(object: app.path as NSString) }
+        .gesture(
+            DragGesture(minimumDistance: 8, coordinateSpace: .local)
+                .onChanged { value in
+                    isDragging = true
+                    dragOffset = value.translation
+                }
+                .onEnded { value in
+                    isDragging = false
+                    // If dragged far enough outward, remove from folder
+                    let dist = sqrt(pow(value.translation.width, 2) + pow(value.translation.height, 2))
+                    if dist > iconSize * 2.5 {
+                        withAnimation(.easeOut(duration: 0.2)) { dragOffset = .zero }
+                        onRemove()
+                    } else {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { dragOffset = .zero }
+                    }
+                }
+        )
         .contextMenu {
             Button("Launch") { onLaunch() }
             Divider()

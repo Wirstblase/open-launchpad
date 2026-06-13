@@ -8,6 +8,16 @@ struct VisualEffectView: NSViewRepresentable {
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
 }
 
+// MARK: - Edit Drag State
+
+/// Tracks an active drag operation during edit (jiggle) mode.
+struct EditDragState {
+    let item: LaunchpadItem
+    let sourceGlobalIndex: Int
+    let startLocation: CGPoint
+    var offset: CGSize = .zero
+}
+
 struct LaunchpadView: View {
     let dismissAction: () -> Void
 
@@ -25,8 +35,11 @@ struct LaunchpadView: View {
     @State private var hoveredMergeTargetID: String? = nil
     @State private var expandedFolder: AppFolder? = nil
     @State private var expandedFolderApps: [AppItem] = []
-    @State private var edgeFlipTimer: Timer? = nil
+    // Edit-mode drag state
     @State private var lastEdgeFlipTime: Date = .distantPast
+    @State private var editDragState: EditDragState? = nil
+    @State private var edgeFlipDirection: Int = 0  // -1 left, 0 none, +1 right
+    @State private var folderVersion: Int = 0       // incremented on folder changes to refresh icons
 
     @State private var searchQuery = ""
 
@@ -97,10 +110,13 @@ struct LaunchpadView: View {
                     .contentShape(Rectangle())
                     .onTapGesture {
                         if expandedFolder != nil { closeFolder() }
+                        else if isJiggling { withAnimation(.easeOut(duration: 0.25)) { isJiggling = false } }
                         else if isSearching { searchQuery = "" }
                         else { animateOut() }
                     }
                 }
+
+                // Floating drag icon handled in editModeOverlay
 
                 if let folder = expandedFolder {
                     FolderView(
@@ -112,14 +128,15 @@ struct LaunchpadView: View {
                     ).transition(.opacity.combined(with: .scale(scale: 0.85)))
                 }
             }
-            .opacity(isAnimatingOut ? 0.0 : (isAnimatingIn ? (expandedFolder != nil ? 0.4 : 1.0) : 0.0))
+            .opacity(isAnimatingOut ? 0.0 : (isAnimatingIn ? 1.0 : 0.0))
             .scaleEffect(isAnimatingOut ? 1.10 : (isAnimatingIn ? 1.0 : 1.10))
             .onReceive(NotificationCenter.default.publisher(for: .launchpadEscapePressed)) { _ in handleEscape() }
+
             .onReceive(NotificationCenter.default.publisher(for: Notification.Name("OpenLaunchpadDismissRequested"))) { _ in animateOut() }
             .onReceive(NotificationCenter.default.publisher(for: .launchpadKeyDown)) { n in handleKeyPress(n, layout: layout) }
             .onReceive(NotificationCenter.default.publisher(for: .launchpadAppsChanged)) { _ in Task { await loadApps() } }
             .onReceive(NotificationCenter.default.publisher(for: .launchpadWillOpen)) { _ in
-                searchQuery = ""; isAnimatingIn = false; isAnimatingOut = false; cachedLayout = nil; cachedPages = []
+                searchQuery = ""; isAnimatingIn = false; isAnimatingOut = false; isJiggling = false; cachedLayout = nil; cachedPages = []
                 withAnimation(.easeOut(duration: 0.35)) { isAnimatingIn = true }
             }
             .onAppear { withAnimation(.easeOut(duration: 0.35)) { isAnimatingIn = true } }
@@ -189,7 +206,7 @@ struct LaunchpadView: View {
                         isJiggling: false, isMergeTarget: false, showLabels: true,
                         appLookup: appLookup,
                         onTap: { if case .app(let a) = item { launchApp(a) } },
-                        onLongPress: {})
+                        onLongPress: { withAnimation(.easeOut(duration: 0.25)) { isJiggling = true } })
                 }
             }.padding(.bottom, 40)
         }
@@ -215,8 +232,9 @@ struct LaunchpadView: View {
                             onTap: { if isJiggling { return }; launchItem(item) },
                             onLongPress: { withAnimation(.easeOut(duration: 0.25)) { isJiggling = true } }
                         )
+                        .id(item.id + (item.id.hasPrefix("folder-") ? "-v\(folderVersion)" : ""))
                         .opacity(dragging ? 0.01 : 1.0)
-                        .onDrop(of: [UTType.text.identifier], delegate: DragRelocateDelegate(
+                        .onDrop(of: [.text], delegate: DragRelocateDelegate(
                             item: item, items: $gridItems, draggedItemID: $draggedItemID,
                             hoveredMergeTargetID: $hoveredMergeTargetID, iconSize: layout.iconSize, onChanged: saveLayout))
                         .opacity(isAnimatingIn ? 1.0 : 0.0)
@@ -232,12 +250,10 @@ struct LaunchpadView: View {
         .frame(width: sw, alignment: .leading)
         .background(Color.black.opacity(0.001))
         .contentShape(Rectangle())
+        .coordinateSpace(name: "pageGridSpace")
         .highPriorityGesture(swipeGesture(pages: pages, sw: sw))
-        .onChange(of: draggedItemID) { _, v in
-            if v != nil, expandedFolder == nil { startEdgeMonitor(sw: sw, pageCount: pages.count) }
-            else { stopEdgeMonitor() }
-        }
-        .onDisappear { stopEdgeMonitor() }
+        .overlay(editModeOverlay(pages: pages, layout: layout, sw: sw))
+
     }
 
     // MARK: - Swipe Gesture
@@ -245,12 +261,14 @@ struct LaunchpadView: View {
     private func swipeGesture(pages: [[LaunchpadItem]], sw: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 10)
             .onChanged { v in
+                guard !isJiggling else { return }
                 let t = v.translation.width
                 if currentPage == 0 && t > 0 { dragOffset = t * 0.3 }
                 else if currentPage == pages.count - 1 && t < 0 { dragOffset = t * 0.3 }
                 else { dragOffset = t }
             }
             .onEnded { v in
+                guard !isJiggling else { return }
                 let thresh: CGFloat = 80
                 let vel = v.predictedEndTranslation.width
                 withAnimation(.easeOut(duration: 0.25)) {
@@ -261,22 +279,262 @@ struct LaunchpadView: View {
             }
     }
 
-    // MARK: - Edge Monitor
+    // MARK: - Edit Mode Overlay (Drag + Edge Arrows)
 
-    private func startEdgeMonitor(sw: CGFloat, pageCount: Int) {
-        stopEdgeMonitor(); lastEdgeFlipTime = .distantPast
-        edgeFlipTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
-            guard self.draggedItemID != nil, self.expandedFolder == nil else { return }
-            guard Date().timeIntervalSince(self.lastEdgeFlipTime) >= 0.8 else { return }
-            guard let w = NSApp.windows.first(where: { $0.isVisible && $0.level == .modalPanel }) else { return }
-            let mx = NSEvent.mouseLocation.x; let f = w.frame
-            if mx <= f.minX + 44, self.currentPage > 0 { self.lastEdgeFlipTime = Date(); self.currentPage -= 1; self.focusedIndex = nil }
-            else if mx >= f.maxX - 44, self.currentPage < pageCount - 1 { self.lastEdgeFlipTime = Date(); self.currentPage += 1; self.focusedIndex = nil }
+    @ViewBuilder
+    private func editModeOverlay(pages: [[LaunchpadItem]], layout: LayoutEngine.GridLayout, sw: CGFloat) -> some View {
+        if isJiggling, expandedFolder == nil {
+            ZStack {
+                // Transparent drag capture layer
+                Color.clear
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 5, coordinateSpace: .local)
+                            .onChanged { value in
+                                handleEditDragChanged(value, layout: layout, pageCount: pages.count, sw: sw)
+                            }
+                            .onEnded { value in
+                                handleEditDragEnded(value, layout: layout, pageCount: pages.count, sw: sw)
+                            }
+                    )
+
+                // Edge navigation arrows (only when there are more pages)
+                if pages.count > 1 {
+                    HStack {
+                        // Left edge arrow
+                        if currentPage > 0 {
+                            edgeArrowButton(direction: -1, sw: sw)
+                        }
+                        Spacer()
+                        // Right edge arrow
+                        if currentPage < pages.count - 1 {
+                            edgeArrowButton(direction: 1, sw: sw)
+                        }
+                    }
+                    .allowsHitTesting(false)  // let drag gesture pass through
+                }
+
+                // Floating dragged icon (follows the cursor)
+                if let state = editDragState {
+                    let fx = state.startLocation.x + state.offset.width
+                    let fy = state.startLocation.y + state.offset.height
+                    AppIconView(
+                        item: state.item,
+                        iconSize: layout.iconSize,
+                        isFocused: false,
+                        isJiggling: false,
+                        isMergeTarget: false,
+                        showLabels: true,
+                        appLookup: appLookup,
+                        onTap: {},
+                        onLongPress: {}
+                    )
+                    .scaleEffect(1.08)
+                    .shadow(color: .black.opacity(0.5), radius: 16, x: 0, y: 6)
+                    .position(x: fx, y: fy)
+                    .allowsHitTesting(false)
+                }
+            }
         }
-        RunLoop.main.add(edgeFlipTimer!, forMode: .common)
     }
 
-    private func stopEdgeMonitor() { edgeFlipTimer?.invalidate(); edgeFlipTimer = nil }
+    private func edgeArrowButton(direction: Int, sw: CGFloat) -> some View {
+        Image(systemName: direction < 0 ? "chevron.left" : "chevron.right")
+            .font(.system(size: 28, weight: .medium))
+            .foregroundColor(.white.opacity(0.25))
+            .frame(width: 50, height: 120)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.white.opacity(0.04))
+            )
+            .padding(.horizontal, 8)
+            .contentShape(Rectangle())
+    }
+
+
+    // MARK: - Edit Drag Handlers
+
+    private func handleEditDragChanged(_ value: DragGesture.Value, layout: LayoutEngine.GridLayout, pageCount: Int, sw: CGFloat) {
+        let loc = value.location
+        let (col, row) = gridCellFromPoint(loc, layout: layout, sw: sw)
+
+        if editDragState == nil {
+            // Determine which icon is at the start location
+            let pageIdx = row * layout.columns + col
+            let globalIdx = currentPage * layout.itemsPerPage + pageIdx
+
+            if globalIdx < gridItems.count {
+                let item = gridItems[globalIdx]
+                editDragState = EditDragState(item: item, sourceGlobalIndex: globalIdx,
+                    startLocation: value.startLocation, offset: .zero)
+                draggedItemID = item.id
+            }
+        }
+
+        if var state = editDragState {
+            state.offset = value.translation
+            editDragState = state
+        }
+
+        // Edge proximity detection for page flip
+        let edgeWidth: CGFloat = 70
+        let cooldown: TimeInterval = 0.55
+        let now = Date()
+
+        if loc.x < edgeWidth, currentPage > 0 {
+            if edgeFlipDirection != -1 || now.timeIntervalSince(lastEdgeFlipTime) > cooldown {
+                edgeFlipDirection = -1
+                if now.timeIntervalSince(lastEdgeFlipTime) > cooldown {
+                    lastEdgeFlipTime = now
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        currentPage -= 1
+                        focusedIndex = nil
+                    }
+                }
+            }
+        } else if loc.x > sw - edgeWidth, currentPage < pageCount - 1 {
+            if edgeFlipDirection != 1 || now.timeIntervalSince(lastEdgeFlipTime) > cooldown {
+                edgeFlipDirection = 1
+                if now.timeIntervalSince(lastEdgeFlipTime) > cooldown {
+                    lastEdgeFlipTime = now
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        currentPage += 1
+                        focusedIndex = nil
+                    }
+                }
+            }
+        } else {
+            edgeFlipDirection = 0
+        }
+    }
+
+    private func handleEditDragEnded(_ value: DragGesture.Value, layout: LayoutEngine.GridLayout, pageCount: Int, sw: CGFloat) {
+        guard let state = editDragState else { return }
+
+        let loc = value.location
+        let (col, row) = gridCellFromPoint(loc, layout: layout, sw: sw)
+        let targetPageIdx = row * layout.columns + col
+        let targetGlobalIdx = currentPage * layout.itemsPerPage + targetPageIdx
+        let clampedTarget = min(targetGlobalIdx, gridItems.count - 1)
+        let sourceIdx = state.sourceGlobalIndex
+
+        guard clampedTarget < gridItems.count, sourceIdx < gridItems.count,
+              clampedTarget != sourceIdx else {
+            withAnimation(.easeOut(duration: 0.2)) {
+                editDragState = nil; draggedItemID = nil; edgeFlipDirection = 0
+            }
+            return
+        }
+
+        // Did the user drop near the CENTER of the target cell?
+        // If so, merge into folder. Otherwise, reorder.
+        let cellWidth = layout.iconSize + 20
+        let cellHeight = layout.iconSize + 34
+        let colStep = cellWidth + layout.columnSpacing
+        let rowStep = cellHeight + layout.rowSpacing
+        let totalGridWidth = CGFloat(layout.columns) * cellWidth + CGFloat(layout.columns - 1) * layout.columnSpacing
+        let xPadding = max(0, (sw - totalGridWidth) / 2)
+
+        let cellCenterX = xPadding + CGFloat(col) * colStep + cellWidth / 2
+        let cellCenterY = CGFloat(row) * rowStep + cellHeight / 2
+        let dx = abs(loc.x - cellCenterX)
+        let dy = abs(loc.y - cellCenterY)
+        let isNearCenter = dx < cellWidth * 0.35 && dy < cellHeight * 0.35
+
+        if isNearCenter,
+           clampedTarget < gridItems.count,
+           gridItems[clampedTarget].id != state.item.id {
+            // Merge into folder (dropped ON another icon)
+            mergeItems(draggedID: state.item.id, into: gridItems[clampedTarget])
+        } else {
+            // Reorder: insert at the target position
+            let insertIdx = clampedTarget > sourceIdx ? clampedTarget + 1 : clampedTarget
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                gridItems.move(fromOffsets: IndexSet(integer: sourceIdx), toOffset: insertIdx)
+            }
+            saveLayout()
+        }
+
+        withAnimation(.easeOut(duration: 0.2)) {
+            editDragState = nil
+            draggedItemID = nil
+            edgeFlipDirection = 0
+        }
+    }
+
+    // MARK: - Grid Cell Calculation
+
+    /// Converts a point in the pageGrid's local coordinate space to (column, row).
+    private func gridCellFromPoint(_ pt: CGPoint, layout: LayoutEngine.GridLayout, sw: CGFloat) -> (col: Int, row: Int) {
+        let cellWidth = layout.iconSize + 20    // GridItem width
+        let cellHeight = layout.iconSize + 34   // icon + labelSpacing(6) + label(28)
+        let colStep = cellWidth + layout.columnSpacing
+        let rowStep = cellHeight + layout.rowSpacing
+
+        let totalGridWidth = CGFloat(layout.columns) * cellWidth + CGFloat(layout.columns - 1) * layout.columnSpacing
+        let xPadding = max(0, (sw - totalGridWidth) / 2)
+
+        let col = max(0, min(layout.columns - 1, Int((pt.x - xPadding) / colStep)))
+        let row = max(0, Int(pt.y / rowStep))
+        return (col: col, row: row)
+    }
+
+    // MARK: - Folder Merging
+
+    /// Merges a dragged item into a target item, creating or expanding a folder.
+    private func mergeItems(draggedID: String, into target: LaunchpadItem) {
+        var fm: [UUID: AppFolder] = [:]
+        for case .folder(let f, _) in gridItems { fm[f.id] = f }
+
+        var order = gridItems.map { $0.id }
+        var newFolderID: UUID? = nil
+
+        switch target {
+        case .app(let ta):
+            let nf = AppFolder(name: "New Folder", appIDs: [ta.id, draggedID])
+            newFolderID = nf.id
+            fm[nf.id] = nf
+            let fid = "folder-\(nf.id.uuidString)"
+            if let ti = order.firstIndex(of: ta.id) { order.insert(fid, at: ti) }
+            else { order.append(fid) }
+            order.removeAll { $0 == draggedID || $0 == ta.id }
+
+        case .folder(var tf, _):
+            if !tf.appIDs.contains(draggedID) { tf.appIDs.append(draggedID); fm[tf.id] = tf }
+            order.removeAll { $0 == draggedID }
+        }
+
+        // Build new items with properly resolved folder apps
+        let appLookup = self.appLookup  // local copy
+        var newItems: [LaunchpadItem] = []
+        for id in order {
+            if id.hasPrefix("folder-"),
+               let fid = UUID(uuidString: String(id.dropFirst(7))),
+               let f = fm[fid] {
+                let folderApps = f.appIDs.compactMap { appLookup[$0] }
+                newItems.append(.folder(f, folderApps))
+            } else if let ex = gridItems.first(where: { $0.id == id }) {
+                newItems.append(ex)
+            }
+        }
+
+        folderVersion += 1  // trigger icon refresh for all folders
+
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+            gridItems = newItems
+        }
+        saveLayout()
+
+        // Auto-open the newly created folder
+        if let fid = newFolderID,
+           let createdFolder = fm[fid] {
+            let folderApps = createdFolder.appIDs.compactMap { appLookup[$0] }
+            withAnimation(.easeOut(duration: 0.3)) {
+                expandedFolder = createdFolder
+                expandedFolderApps = folderApps
+            }
+        }
+    }
 
     // MARK: - Bottom Bar
 

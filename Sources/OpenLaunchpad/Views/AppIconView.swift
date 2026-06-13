@@ -17,7 +17,7 @@ struct AppIconView: View {
     let onLongPress: () -> Void
 
     @State private var resolvedIcon: NSImage?
-    @State private var jiggleAngleDegrees: Double = 0
+    @State private var isPressed = false
 
     // MARK: - Layout Constants
 
@@ -25,7 +25,6 @@ struct AppIconView: View {
     private var iconCornerRadius: CGFloat { iconSize * 0.225 }
     private var labelFrameHeight: CGFloat { 28 }
     private var labelWidthOffset: CGFloat { 20 }
-    private var deleteBadgeSize: CGFloat { 20 }
 
     var body: some View {
         VStack(spacing: labelSpacing) {
@@ -46,10 +45,6 @@ struct AppIconView: View {
                     .scaleEffect(1.12)
                     .opacity(isMergeTarget ? 1.0 : 0.0)
 
-                // Delete badge (jiggle mode)
-                if isJiggling {
-                    deleteBadge
-                }
             }
             .scaleEffect(isMergeTarget ? 1.15 : 1.0)
             .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isMergeTarget)
@@ -66,33 +61,25 @@ struct AppIconView: View {
         }
         .frame(width: iconSize + labelWidthOffset)
         .contentShape(Rectangle())
+        .overlay(Color.black.opacity(isPressed ? 0.35 : 0))
+        .animation(.easeOut(duration: 0.1), value: isPressed)
         .accessibilityLabel("\(item.name), \(item.id.hasPrefix("folder-") ? "Folder" : "Application")")
         .accessibilityHint(item.id.hasPrefix("folder-") ? "Double-tap to open folder" : "Double-tap to launch application")
         .accessibilityAddTraits(.isButton)
-        .rotationEffect(.degrees(jiggleAngleDegrees))
-        .onChange(of: isJiggling) { _, jiggling in
-            if !jiggling { jiggleAngleDegrees = 0 }
+        .rotationEffect(isJiggling ? .degrees(3.5) : .zero)
+        .animation(isJiggling ? Animation.easeInOut(duration: 0.12).repeatForever(autoreverses: true) : .default, value: isJiggling)
+        // Tap with visual feedback
+        .onTapGesture {
+            isPressed = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { isPressed = false }
+            onTap()
         }
-        .onReceive(Timer.publish(every: 1.0/60.0, on: .main, in: .common).autoconnect()) { date in
-            guard isJiggling else { return }
-            let hash = abs(item.id.hashValue)
-            let phase = Double(hash % 100) / 100.0 * .pi * 2
-            jiggleAngleDegrees = sin(date.timeIntervalSinceReferenceDate * 6 + phase) * 1.5
-        }
-        // Tap
+        // Long press to enter edit mode
         .simultaneousGesture(
-            TapGesture().onEnded {
-                onTap()
-            }
+            LongPressGesture(minimumDuration: 0.5)
+                .onEnded { _ in onLongPress() }
         )
-        // Long-press → enter jiggle mode
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.6)
-                .onEnded { _ in
-                    onLongPress()
-                }
-        )
-        // Drag to reorder / create folders
+        // Drag to move icons (only useful in edit mode; ignored when not jiggling)
         .onDrag {
             NSItemProvider(object: item.id as NSString)
         }
@@ -118,29 +105,6 @@ struct AppIconView: View {
         }
     }
 
-    // MARK: - Delete Badge
-
-    private var deleteBadge: some View {
-        VStack {
-            HStack {
-                Spacer()
-                ZStack {
-                    Circle()
-                        .fill(Color.white)
-                        .frame(width: deleteBadgeSize, height: deleteBadgeSize)
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundColor(.black)
-                }
-                .offset(x: 6, y: -6)
-            }
-            Spacer()
-        }
-        .onTapGesture {
-            // Phase 4: hide app from Launchpad
-        }
-    }
-
     // MARK: - Icon Resolution
 
     private func resolveIcon() async {
@@ -148,21 +112,41 @@ struct AppIconView: View {
         case .app(let app):
             resolvedIcon = await IconCache.shared.icon(for: app)
         case .folder(let folder, _):
-            resolvedIcon = await renderFolderPreview(folder: folder)
+            resolvedIcon = renderFolderPreview(folder: folder)
         }
     }
 
     /// Renders a 3×3 mini-grid preview for folder icons.
-    private func renderFolderPreview(folder: AppFolder) async -> NSImage? {
+    private func renderFolderPreview(folder: AppFolder) -> NSImage? {
         let previewSize = iconSize
+        let scale: CGFloat = 2.0  // Retina
+        let pixelW = Int(previewSize * scale)
+        let pixelH = Int(previewSize * scale)
         let mini = previewSize * 0.24
         let gap = previewSize * 0.05
         let pad = (previewSize - 3 * mini - 2 * gap) / 2
 
-        let image = NSImage(size: NSSize(width: previewSize, height: previewSize))
-        image.lockFocus()
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixelW,
+            pixelsHigh: pixelH,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return nil }
 
-        // Background
+        rep.size = NSSize(width: previewSize, height: previewSize)
+
+        // Set up graphics context BEFORE saving state
+        let nsContext = NSGraphicsContext(bitmapImageRep: rep)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = nsContext
+
+        // Background rounded rect
         let bgPath = NSBezierPath(
             roundedRect: NSRect(x: 0, y: 0, width: previewSize, height: previewSize),
             xRadius: previewSize * 0.225,
@@ -171,23 +155,33 @@ struct AppIconView: View {
         NSColor.white.withAlphaComponent(0.15).setFill()
         bgPath.fill()
 
-        // Draw up to 9 app icons
+        // Draw up to 9 app icons (3×3 grid, top-to-bottom)
         let iconCount = min(folder.appIDs.count, 9)
         for i in 0..<iconCount {
             let col = CGFloat(i % 3)
             let row = CGFloat(i / 3)
             let x = pad + col * (mini + gap)
-            let y = pad + (2 - row) * (mini + gap)  // top-to-bottom
+            let y = pad + (2 - row) * (mini + gap)  // flip Y: row 0 at top
             let rect = NSRect(x: x, y: y, width: mini, height: mini)
 
-            // Look up app in the provided dictionary
             if let app = appLookup[folder.appIDs[i]] {
-                let icon = await IconCache.shared.icon(for: app)
-                icon.draw(in: rect)
+                // Use synchronous NSWorkspace icon for reliable drawing
+                let icon = NSWorkspace.shared.icon(forFile: app.path)
+                icon.size = NSSize(width: mini * scale, height: mini * scale)
+                icon.draw(in: rect, from: NSRect(x: 0, y: 0, width: icon.size.width, height: icon.size.height),
+                          operation: .sourceOver, fraction: 1.0)
+            } else {
+                // Fallback: draw a small colored placeholder
+                let hue = CGFloat(abs(folder.appIDs[i].hashValue) % 256) / 256.0
+                NSColor(hue: hue, saturation: 0.5, brightness: 0.7, alpha: 0.6).setFill()
+                NSBezierPath(roundedRect: rect, xRadius: mini * 0.2, yRadius: mini * 0.2).fill()
             }
         }
 
-        image.unlockFocus()
+        NSGraphicsContext.restoreGraphicsState()
+
+        let image = NSImage(size: NSSize(width: previewSize, height: previewSize))
+        image.addRepresentation(rep)
         return image
     }
 
