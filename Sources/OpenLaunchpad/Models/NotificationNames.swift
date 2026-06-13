@@ -10,4 +10,5 @@ extension Notification.Name {
     static let launchpadKeyDown = Notification.Name("OpenLaunchpadKeyDown")
     static let launchpadAlphaNumericTyped = Notification.Name("OpenLaunchpadAlphaNumericTyped")
     static let launchpadAppsChanged = Notification.Name("OpenLaunchpadAppsChanged")
+    static let launchpadPageSwipe = Notification.Name("OpenLaunchpadPageSwipe")
 }

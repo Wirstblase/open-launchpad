@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setupWindow()
         setupKeyMonitor()
         setupMouseHoldMonitor()
+        setupScrollMonitor()
         setupHotkey()
         setupGestures()
         setupAppWatcher()
@@ -112,6 +113,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
             self?.mouseHoldTimer?.invalidate()
             self?.mouseHoldTimer = nil
+            return event
+        }
+    }
+
+    // MARK: - Trackpad Swipe Monitor
+
+    private var scrollAccumulator: CGFloat = 0
+
+    private func setupScrollMonitor() {
+        NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self = self, self.window?.isVisible == true else { return event }
+            guard event.hasPreciseScrollingDeltas else { return event }
+            guard let fr = self.window?.firstResponder,
+                  !(fr is NSTextView || fr is NSTextField) else { return event }
+
+            self.scrollAccumulator += event.scrollingDeltaX
+
+            switch event.phase {
+            case .began:
+                self.scrollAccumulator = event.scrollingDeltaX
+
+            case .changed:
+                // Live tracking — post intermediate position for bounce preview
+                NotificationCenter.default.post(
+                    name: .launchpadPageSwipe, object: nil,
+                    userInfo: ["phase": "changed", "delta": self.scrollAccumulator])
+
+            case .ended, .cancelled:
+                let delta = self.scrollAccumulator
+                self.scrollAccumulator = 0
+                // Threshold: need > 150pt swipe to change page, otherwise bounce back
+                if abs(delta) > 150 {
+                    let direction: Int = delta > 0 ? -1 : 1
+                    NotificationCenter.default.post(
+                        name: .launchpadPageSwipe, object: nil,
+                        userInfo: ["phase": "committed", "direction": direction])
+                } else {
+                    NotificationCenter.default.post(
+                        name: .launchpadPageSwipe, object: nil,
+                        userInfo: ["phase": "bounceback"])
+                }
+
+            default:
+                break
+            }
             return event
         }
     }

@@ -134,7 +134,52 @@ struct LaunchpadView: View {
                 withAnimation(.easeOut(duration: 0.25)) { isJiggling = true }
             }
             .onReceive(NotificationCenter.default.publisher(for: .launchpadEscapePressed)) { _ in handleEscape() }
+            .onReceive(NotificationCenter.default.publisher(for: .launchpadPageSwipe)) { n in
+                guard !isSearching, !isJiggling, expandedFolder == nil else { return }
+                let phase = n.userInfo?["phase"] as? String
+                let pageCount = cachedPages.isEmpty
+                    ? chunked(items: displayItems, size: layout.itemsPerPage).count
+                    : cachedPages.count
 
+                switch phase {
+                case "changed":
+                    if let delta = n.userInfo?["delta"] as? CGFloat {
+                        let sw = geo.size.width
+                        // Clamp with rubber-banding at edges
+                        let projected = delta * 0.5
+                        if currentPage == 0 && projected > 0 {
+                            dragOffset = projected * 0.35
+                        } else if currentPage == pageCount - 1 && projected < 0 {
+                            dragOffset = projected * 0.35
+                        } else {
+                            dragOffset = projected
+                        }
+                    }
+
+                case "committed":
+                    if let dir = n.userInfo?["direction"] as? Int {
+                        let newPage = currentPage + dir
+                        if newPage >= 0, newPage < pageCount {
+                            withAnimation(.easeOut(duration: 0.25)) {
+                                currentPage = newPage
+                                dragOffset = 0
+                                focusedIndex = nil
+                            }
+                        } else {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                                dragOffset = 0
+                            }
+                        }
+                    }
+
+                case "bounceback":
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                        dragOffset = 0
+                    }
+
+                default: break
+                }
+            }
             .onReceive(NotificationCenter.default.publisher(for: Notification.Name("OpenLaunchpadDismissRequested"))) { _ in animateOut() }
             .onReceive(NotificationCenter.default.publisher(for: .launchpadKeyDown)) { n in handleKeyPress(n, layout: layout) }
             .onReceive(NotificationCenter.default.publisher(for: .launchpadAppsChanged)) { _ in Task { await loadApps() } }
@@ -254,6 +299,7 @@ struct LaunchpadView: View {
         .frame(width: sw * CGFloat(pages.count), alignment: .leading)
         .offset(x: -CGFloat(currentPage) * sw + dragOffset)
         .frame(width: sw, alignment: .leading)
+        .compositingGroup()  // isolate page strip in its own layer — GPU handles offset changes
         .background(Color.black.opacity(0.001))
         .contentShape(Rectangle())
         .coordinateSpace(name: "pageGridSpace")
@@ -512,6 +558,11 @@ struct LaunchpadView: View {
 
         // Build new items with properly resolved folder apps
         let appLookup = self.appLookup  // local copy
+        
+        // Collect all app IDs that live inside folders
+        var folderAppIDs = Set<String>()
+        for (_, f) in fm { folderAppIDs.formUnion(f.appIDs) }
+        
         var newItems: [LaunchpadItem] = []
         for id in order {
             if id.hasPrefix("folder-"),
@@ -519,7 +570,9 @@ struct LaunchpadView: View {
                let f = fm[fid] {
                 let folderApps = f.appIDs.compactMap { appLookup[$0] }
                 newItems.append(.folder(f, folderApps))
-            } else if let ex = gridItems.first(where: { $0.id == id }) {
+            } else if let ex = gridItems.first(where: { $0.id == id }),
+                      !folderAppIDs.contains(id) {
+                // Skip standalone items that are already inside a folder
                 newItems.append(ex)
             }
         }
