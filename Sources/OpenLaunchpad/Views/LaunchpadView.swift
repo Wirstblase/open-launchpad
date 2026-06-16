@@ -132,7 +132,13 @@ struct LaunchpadView: View {
             .opacity(isAnimatingOut ? 0.0 : (isAnimatingIn ? 1.0 : 0.0))
             .scaleEffect(isAnimatingOut ? 1.10 : (isAnimatingIn ? 1.0 : 1.10))
             .onReceive(NotificationCenter.default.publisher(for: Notification.Name("OpenLaunchpadLongPress"))) { _ in
-                withAnimation(.easeOut(duration: 0.25)) { isJiggling = true }
+                // Snap any in-progress scroll offset back to zero before entering
+                // jiggle mode, otherwise the page freezes at a mid-scroll position
+                // since the scroll handler ignores events while jiggling.
+                withAnimation(.easeOut(duration: 0.25)) {
+                    dragOffset = 0
+                    isJiggling = true
+                }
             }
             .onReceive(NotificationCenter.default.publisher(for: .launchpadEscapePressed)) { _ in handleEscape() }
             .onReceive(NotificationCenter.default.publisher(for: .launchpadPageSwipe)) { n in

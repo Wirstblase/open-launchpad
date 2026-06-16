@@ -61,24 +61,27 @@ let inner = size - margin * 2
 let image = NSImage(size: NSSize(width: size, height: size))
 image.lockFocus()
 
-// Dark rounded rect background
+// Light gray rounded rect background — rgb(222, 222, 222) with slight transparency
 let bg = NSBezierPath(roundedRect: NSRect(x: margin, y: margin, width: inner, height: inner),
                       xRadius: inner * 0.225, yRadius: inner * 0.225)
-NSColor(red: 0.12, green: 0.12, blue: 0.15, alpha: 1.0).setFill()
+NSColor(red: 222.0/255.0, green: 222.0/255.0, blue: 222.0/255.0, alpha: 0.82).setFill()
 bg.fill()
 
-// 3x3 grid of rounded squares
-let dot = inner * 0.10
-let gap = inner * 0.12
+// 3x3 grid of rounded squares, each with a random vibrant color
+let dot = inner * 0.14
+let gap = inner * 0.10
 let startX = margin + (inner - (3 * dot + 2 * gap)) / 2
 let startY = margin + (inner - (3 * dot + 2 * gap)) / 2
-NSColor.white.withAlphaComponent(0.85).setFill()
 for row in 0..<3 {
     for col in 0..<3 {
         let x = startX + Double(col) * (dot + gap)
         let y = startY + Double(row) * (dot + gap)
         let r = NSBezierPath(roundedRect: NSRect(x: x, y: y, width: dot, height: dot),
                              xRadius: dot / 2, yRadius: dot / 2)
+        let hue = CGFloat.random(in: 0...1)
+        let saturation = CGFloat.random(in: 0.5...0.9)
+        let brightness = CGFloat.random(in: 0.7...1.0)
+        NSColor(hue: hue, saturation: saturation, brightness: brightness, alpha: 1.0).setFill()
         r.fill()
     }
 }
