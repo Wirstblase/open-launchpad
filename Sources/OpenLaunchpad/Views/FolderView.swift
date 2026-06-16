@@ -1,6 +1,15 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+// MARK: - Visual Effect (used for folder panel background)
+
+struct VisualEffectView: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let v = NSVisualEffectView(); v.blendingMode = .behindWindow; v.state = .active; v.material = .hudWindow; return v
+    }
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
+}
+
 // MARK: - Folder Expanded View
 
 /// Full overlay showing the contents of a folder with frosted glass styling.

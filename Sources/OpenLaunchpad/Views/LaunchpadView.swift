@@ -1,13 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-struct VisualEffectView: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let v = NSVisualEffectView(); v.blendingMode = .behindWindow; v.state = .active; v.material = .hudWindow; return v
-    }
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
-}
-
 // MARK: - Edit Drag State
 
 /// Tracks an active drag operation during edit (jiggle) mode.
@@ -31,29 +24,26 @@ struct LaunchpadView: View {
     @State private var isAnimatingOut = false
 
     @State private var isJiggling = false
+    @State private var jiggleAngle: Double = 0
     @State private var draggedItemID: String? = nil
     @State private var hoveredMergeTargetID: String? = nil
     @State private var expandedFolder: AppFolder? = nil
     @State private var expandedFolderApps: [AppItem] = []
-    // Edit-mode drag state
     @State private var lastEdgeFlipTime: Date = .distantPast
     @State private var editDragState: EditDragState? = nil
-    @State private var edgeFlipDirection: Int = 0  // -1 left, 0 none, +1 right
-    @State private var folderVersion: Int = 0       // incremented on folder changes to refresh icons
+    @State private var edgeFlipDirection: Int = 0
+    @State private var folderVersion: Int = 0
 
     @State private var searchQuery = ""
 
-    private var isSearching: Bool { !searchQuery.isEmpty }
-
-    // MARK: - Cached Layout
-
     @State private var cachedLayout: LayoutEngine.GridLayout?
     @State private var cachedPages: [[LaunchpadItem]] = []
+    @State private var cachedAppLookup: [String: AppItem] = [:]
 
-    /// Builds a lookup dictionary from all scanned apps for folder preview rendering.
-    private var appLookup: [String: AppItem] {
-        Dictionary(uniqueKeysWithValues: allApps.map { ($0.id, $0) })
-    }
+    // Static blurred screenshot — captured once on open, cached per screen
+    @State private var backgroundImage: NSImage?
+
+    private var isSearching: Bool { !searchQuery.isEmpty }
 
     private var displayItems: [LaunchpadItem] {
         guard isSearching else { return gridItems }
@@ -64,17 +54,17 @@ struct LaunchpadView: View {
     var body: some View {
         GeometryReader { geo in
             let sw = geo.size.width
-            let layout = cachedLayout ?? LayoutEngine.layout(screenWidth: sw, screenHeight: geo.size.height, itemCount: displayItems.count)
+            let sh = geo.size.height
+            let layout = cachedLayout ?? LayoutEngine.layout(screenWidth: sw, screenHeight: sh, itemCount: displayItems.count)
             let pages = cachedPages.isEmpty ? chunked(items: displayItems, size: layout.itemsPerPage) : cachedPages
 
             ZStack {
-                // Blurred background
-                VisualEffectView().edgesIgnoringSafeArea(.all)
+                // Static blurred screenshot — replaces per-frame .behindWindow sampling
+                backgroundLayer
 
-                // Tap-to-dismiss layer (behind content)
+                // Tap-to-dismiss layer
                 Color.clear
                     .contentShape(Rectangle())
-                    .edgesIgnoringSafeArea(.all)
                     .onTapGesture {
                         if expandedFolder != nil { closeFolder() }
                         else if isSearching { searchQuery = "" }
@@ -87,26 +77,20 @@ struct LaunchpadView: View {
                     emptyView
                 } else {
                     VStack(spacing: 0) {
-                        // Search bar always visible at top
                         searchBar
                             .padding(.top, 36)
-
                         Spacer().frame(height: 24)
-
                         if isSearching {
                             searchGrid(layout: layout, sw: sw)
                         } else {
-                            pageGrid(pages: pages, layout: layout, sw: sw)
+                            jiggleAwarePageGrid(pages: pages, layout: layout, sw: sw)
                         }
-
                         Spacer()
-
                         if !isSearching {
                             bottomBar(pageCount: pages.count, sw: sw)
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
                     .contentShape(Rectangle())
                     .onTapGesture {
                         if expandedFolder != nil { closeFolder() }
@@ -115,8 +99,6 @@ struct LaunchpadView: View {
                         else { animateOut() }
                     }
                 }
-
-                // Floating drag icon handled in editModeOverlay
 
                 if let folder = expandedFolder {
                     FolderView(
@@ -129,12 +111,17 @@ struct LaunchpadView: View {
                     ).transition(.opacity.combined(with: .scale(scale: 0.85)))
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .opacity(isAnimatingOut ? 0.0 : (isAnimatingIn ? 1.0 : 0.0))
             .scaleEffect(isAnimatingOut ? 1.10 : (isAnimatingIn ? 1.0 : 1.10))
+            .onChange(of: geo.size.width) { _, newWidth in
+                let newLayout = LayoutEngine.layout(screenWidth: newWidth, screenHeight: sh, itemCount: displayItems.count)
+                if cachedLayout?.columns != newLayout.columns || cachedLayout?.iconSize != newLayout.iconSize {
+                    cachedLayout = newLayout
+                    cachedPages = chunked(items: displayItems, size: newLayout.itemsPerPage)
+                }
+            }
             .onReceive(NotificationCenter.default.publisher(for: Notification.Name("OpenLaunchpadLongPress"))) { _ in
-                // Snap any in-progress scroll offset back to zero before entering
-                // jiggle mode, otherwise the page freezes at a mid-scroll position
-                // since the scroll handler ignores events while jiggling.
                 withAnimation(.easeOut(duration: 0.25)) {
                     dragOffset = 0
                     isJiggling = true
@@ -143,7 +130,6 @@ struct LaunchpadView: View {
             .onReceive(NotificationCenter.default.publisher(for: .launchpadEscapePressed)) { _ in handleEscape() }
             .onReceive(NotificationCenter.default.publisher(for: .launchpadPageSwipe)) { n in
                 guard !isSearching, !isJiggling, expandedFolder == nil else { return }
-                let phase = n.userInfo?["phase"] as? String
                 let pageCount = cachedPages.isEmpty
                     ? chunked(items: displayItems, size: layout.itemsPerPage).count
                     : cachedPages.count
@@ -151,7 +137,6 @@ struct LaunchpadView: View {
                 switch phase {
                 case "changed":
                     if let delta = n.userInfo?["delta"] as? CGFloat {
-                        // Track fingers 1:1; apply rubber-banding at first/last page
                         if currentPage == 0 && delta > 0 {
                             dragOffset = delta * 0.25
                         } else if currentPage == pageCount - 1 && delta < 0 {
@@ -191,17 +176,37 @@ struct LaunchpadView: View {
             .onReceive(NotificationCenter.default.publisher(for: .launchpadWillOpen)) { _ in
                 searchQuery = ""; isAnimatingIn = false; isAnimatingOut = false; isJiggling = false; cachedLayout = nil; cachedPages = []
                 withAnimation(.easeOut(duration: 0.35)) { isAnimatingIn = true }
+                captureBackground()
             }
-            .onAppear { withAnimation(.easeOut(duration: 0.35)) { isAnimatingIn = true } }
-            .onChange(of: geo.size.width) { _, newWidth in
-                let newLayout = LayoutEngine.layout(screenWidth: newWidth, screenHeight: geo.size.height, itemCount: displayItems.count)
-                if cachedLayout?.columns != newLayout.columns || cachedLayout?.iconSize != newLayout.iconSize {
-                    cachedLayout = newLayout
-                    cachedPages = chunked(items: displayItems, size: newLayout.itemsPerPage)
-                }
+            .onAppear {
+                withAnimation(.easeOut(duration: 0.35)) { isAnimatingIn = true }
+                captureBackground()
             }
-            .task { await loadApps() }
         }
+        .onChange(of: allApps) { _, apps in
+            cachedAppLookup = Dictionary(uniqueKeysWithValues: apps.map { ($0.id, $0) })
+        }
+        .task { await loadApps() }
+    }
+
+    // MARK: - Background (Static Screenshot + Blur — captured once on open)
+
+    @ViewBuilder
+    private var backgroundLayer: some View {
+        if let bg = backgroundImage {
+            Image(nsImage: bg)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+        } else {
+            // Fallback until screenshot is captured (brief flash, then replaced)
+            Color.black.opacity(0.55)
+        }
+    }
+
+    /// Captures and caches the blurred desktop background for the current screen.
+    private func captureBackground() {
+        guard let window = NSApp.keyWindow, let screen = window.screen else { return }
+        backgroundImage = BackgroundCapture.capture(for: screen)
     }
 
     // MARK: - Search Bar (AppKit NSTextField for reliable input)
@@ -256,8 +261,8 @@ struct LaunchpadView: View {
             LazyVGrid(columns: cols, spacing: layout.rowSpacing) {
                 ForEach(Array(displayItems.enumerated()), id: \.element.id) { i, item in
                     AppIconView(item: item, iconSize: layout.iconSize, isFocused: focusedIndex == i,
-                        isJiggling: false, isMergeTarget: false, showLabels: true,
-                        appLookup: appLookup,
+                        isJiggling: false, jiggleAngle: 0, isMergeTarget: false, showLabels: true,
+                        appLookup: cachedAppLookup,
                         onTap: { if case .app(let a) = item { launchApp(a) } },
                         onLongPress: { withAnimation(.easeOut(duration: 0.25)) { isJiggling = true } })
                 }
@@ -265,56 +270,91 @@ struct LaunchpadView: View {
         }
     }
 
-    // MARK: - Page Grid (HStack + offset, the reliable approach)
+    // MARK: - Jiggle-Aware Page Grid
 
-    private func pageGrid(pages: [[LaunchpadItem]], layout: LayoutEngine.GridLayout, sw: CGFloat) -> some View {
+    /// When jiggling, wraps the page grid in a TimelineView so all icons share
+    /// ONE frame-synchronized angle instead of 35+ independent .repeatForever animations.
+    @ViewBuilder
+    private func jiggleAwarePageGrid(pages: [[LaunchpadItem]], layout: LayoutEngine.GridLayout, sw: CGFloat) -> some View {
+        if isJiggling {
+            TimelineView(.animation) { timeline in
+                let angle = sin(timeline.date.timeIntervalSinceReferenceDate * 52.0) * 3.5
+                pageGridContent(pages: pages, layout: layout, sw: sw, jiggleAngle: angle)
+                    .onAppear {
+                        // Publish grid frames once (not every frame)
+                        publishGridFramesOnce(pages: pages, layout: layout, sw: sw)
+                    }
+            }
+        } else {
+            pageGridContent(pages: pages, layout: layout, sw: sw, jiggleAngle: 0)
+                .onAppear {
+                    publishGridFramesOnce(pages: pages, layout: layout, sw: sw)
+                }
+        }
+    }
+
+    // MARK: - Page Grid Content (renders adjacent pages only)
+
+    private func pageGridContent(pages: [[LaunchpadItem]], layout: LayoutEngine.GridLayout, sw: CGFloat, jiggleAngle: Double) -> some View {
         let cols = Array(repeating: GridItem(.fixed(layout.iconSize + 20), spacing: layout.columnSpacing), count: layout.columns)
-
-        // Publish grid item frames for hit-testing in long-press monitor
-        publishGridFrames(pages: pages, layout: layout, sw: sw)
+        let visibleRange = visiblePageRange(totalPages: pages.count)
+        let totalWidth = sw * CGFloat(pages.count)
 
         return HStack(alignment: .top, spacing: 0) {
             ForEach(0..<pages.count, id: \.self) { pi in
-                LazyVGrid(columns: cols, spacing: layout.rowSpacing) {
-                    ForEach(Array(pages[pi].enumerated()), id: \.element.id) { i, item in
-                        let gi = pi * layout.itemsPerPage + i
-                        let dragging = draggedItemID == item.id
-                        let target = hoveredMergeTargetID == item.id
+                if visibleRange.contains(pi) {
+                    LazyVGrid(columns: cols, spacing: layout.rowSpacing) {
+                        ForEach(Array(pages[pi].enumerated()), id: \.element.id) { i, item in
+                            let gi = pi * layout.itemsPerPage + i
+                            let dragging = draggedItemID == item.id
+                            let target = hoveredMergeTargetID == item.id
 
-                        AppIconView(item: item, iconSize: layout.iconSize,
-                            isFocused: currentPage == pi && focusedIndex == gi,
-                            isJiggling: isJiggling, isMergeTarget: target, showLabels: true,
-                            appLookup: appLookup,
-                            onTap: { if isJiggling { return }; launchItem(item) },
-                            onLongPress: { withAnimation(.easeOut(duration: 0.25)) { isJiggling = true } }
-                        )
-                        .id(item.id + (item.id.hasPrefix("folder-") ? "-v\(folderVersion)" : ""))
-                        .opacity(dragging ? 0.01 : 1.0)
-                        .onDrop(of: [.text], delegate: DragRelocateDelegate(
-                            item: item, items: $gridItems, draggedItemID: $draggedItemID,
-                            hoveredMergeTargetID: $hoveredMergeTargetID, iconSize: layout.iconSize,
-                            onChanged: saveLayout,
-                            onMerge: { draggedID, target in
-                                mergeItems(draggedID: draggedID, into: target)
-                            }))
-                        .opacity(isAnimatingIn ? 1.0 : 0.0)
-                        .scaleEffect(isAnimatingIn ? 1.0 : 1.15)
-                        .animation(.easeOut(duration: 0.3).delay(Double(gi) * 0.012), value: isAnimatingIn)
+                            AppIconView(item: item, iconSize: layout.iconSize,
+                                isFocused: currentPage == pi && focusedIndex == gi,
+                                isJiggling: isJiggling, jiggleAngle: jiggleAngle,
+                                isMergeTarget: target, showLabels: true,
+                                appLookup: cachedAppLookup,
+                                onTap: { if isJiggling { return }; launchItem(item) },
+                                onLongPress: { withAnimation(.easeOut(duration: 0.25)) { isJiggling = true } }
+                            )
+                            .id(item.id + (item.id.hasPrefix("folder-") ? "-v\(folderVersion)" : ""))
+                            .opacity(dragging ? 0.01 : 1.0)
+                            .onDrop(of: [.text], delegate: DragRelocateDelegate(
+                                item: item, items: $gridItems, draggedItemID: $draggedItemID,
+                                hoveredMergeTargetID: $hoveredMergeTargetID, iconSize: layout.iconSize,
+                                onChanged: saveLayout,
+                                onMerge: { draggedID, target in
+                                    mergeItems(draggedID: draggedID, into: target)
+                                }))
+                            .opacity(isAnimatingIn ? 1.0 : 0.0)
+                            .scaleEffect(isAnimatingIn ? 1.0 : 1.15)
+                            .animation(.easeOut(duration: 0.3).delay(Double(gi) * 0.012), value: isAnimatingIn)
+                        }
                     }
+                    .frame(width: sw)
+                    .compositingGroup()  // Per-page layer isolation — NOT on the entire strip
+                } else {
+                    // Off-screen pages: empty placeholder to maintain HStack width
+                    Color.clear.frame(width: sw)
                 }
-                .frame(width: sw)
             }
         }
-        .frame(width: sw * CGFloat(pages.count), alignment: .leading)
+        .frame(width: totalWidth, alignment: .leading)
         .offset(x: -CGFloat(currentPage) * sw + dragOffset)
         .frame(width: sw, alignment: .leading)
-        .compositingGroup()  // isolate page strip in its own layer — GPU handles offset changes
         .background(Color.black.opacity(0.001))
         .contentShape(Rectangle())
         .coordinateSpace(name: "pageGridSpace")
         .highPriorityGesture(swipeGesture(pages: pages, sw: sw))
         .overlay(editModeOverlay(pages: pages, layout: layout, sw: sw))
+    }
 
+    /// Returns the range of page indices that should be rendered.
+    /// Only current page ± 1 to minimize the view hierarchy.
+    private func visiblePageRange(totalPages: Int) -> ClosedRange<Int> {
+        let lo = max(0, currentPage - 1)
+        let hi = min(totalPages - 1, currentPage + 1)
+        return lo...max(lo, hi)
     }
 
     // MARK: - Swipe Gesture
@@ -384,9 +424,10 @@ struct LaunchpadView: View {
                         iconSize: layout.iconSize,
                         isFocused: false,
                         isJiggling: false,
+                        jiggleAngle: 0,
                         isMergeTarget: false,
                         showLabels: true,
-                        appLookup: appLookup,
+                        appLookup: cachedAppLookup,
                         onTap: {},
                         onLongPress: {}
                     )
@@ -617,7 +658,7 @@ struct LaunchpadView: View {
         }
 
         // Build new items with properly resolved folder apps
-        let appLookup = self.appLookup  // local copy
+        let lookup = cachedAppLookup  // local copy
         
         // Collect all app IDs that live inside folders
         var folderAppIDs = Set<String>()
@@ -628,7 +669,7 @@ struct LaunchpadView: View {
             if id.hasPrefix("folder-"),
                let fid = UUID(uuidString: String(id.dropFirst(7))),
                let f = fm[fid] {
-                let folderApps = f.appIDs.compactMap { appLookup[$0] }
+                let folderApps = f.appIDs.compactMap { lookup[$0] }
                 newItems.append(.folder(f, folderApps))
             } else if let ex = gridItems.first(where: { $0.id == id }),
                       !folderAppIDs.contains(id) {
@@ -638,6 +679,10 @@ struct LaunchpadView: View {
         }
 
         folderVersion += 1  // trigger icon refresh for all folders
+        // Invalidate cached folder previews
+        for fid in fm.keys {
+            Task { await IconCache.shared.invalidateFolder(folderID: fid.uuidString) }
+        }
 
         withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
             gridItems = newItems
@@ -647,7 +692,7 @@ struct LaunchpadView: View {
         // Auto-open the newly created folder and exit edit mode
         if let fid = newFolderID,
            let createdFolder = fm[fid] {
-            let folderApps = createdFolder.appIDs.compactMap { appLookup[$0] }
+            let folderApps = createdFolder.appIDs.compactMap { cachedAppLookup[$0] }
             withAnimation(.easeOut(duration: 0.3)) {
                 isJiggling = false
                 expandedFolder = createdFolder
@@ -656,29 +701,12 @@ struct LaunchpadView: View {
         }
     }
 
-    // MARK: - Grid Frames for Hit-Testing
+    // MARK: - Grid Frames for Hit-Testing (computed once, not in body)
 
-    private func publishGridFrames(pages: [[LaunchpadItem]], layout: LayoutEngine.GridLayout, sw: CGFloat) {
-        let cellWidth = layout.iconSize + 20
-        let cellHeight = layout.iconSize + 34
-        let colStep = cellWidth + layout.columnSpacing
-        let rowStep = cellHeight + layout.rowSpacing
-        let totalGridWidth = CGFloat(layout.columns) * cellWidth + CGFloat(layout.columns - 1) * layout.columnSpacing
-        let xPadding = max(0, (sw - totalGridWidth) / 2)
-        let gridTop: CGFloat = 100  // search bar + spacer
-
-        var frames: [(id: String, frame: CGRect)] = []
-        for (_, page) in pages.enumerated() {
-            for (i, item) in page.enumerated() {
-                let col = CGFloat(i % layout.columns)
-                let row = CGFloat(i / layout.columns)
-                let x = xPadding + col * colStep
-                let y = gridTop + row * rowStep
-                // Adjust for page offset (pageGrid starts at x=0 in local coords)
-                let frame = CGRect(x: x, y: y, width: cellWidth, height: cellHeight)
-                frames.append((id: item.id, frame: frame))
-            }
-        }
+    /// Publishes grid item frames for hit-testing in the long-press monitor.
+    /// Called from .onAppear — NOT from the view body.
+    private func publishGridFramesOnce(pages: [[LaunchpadItem]], layout: LayoutEngine.GridLayout, sw: CGFloat) {
+        let frames = LayoutEngine.computeGridFrames(pages: pages, layout: layout, screenWidth: sw)
 
         AppDelegate.currentGridLayoutInfo = AppDelegate.GridLayoutInfo(
             items: frames,
@@ -740,7 +768,8 @@ struct LaunchpadView: View {
             PersistenceManager.save(s)
             if expandedFolder?.id == folder.id { expandedFolder?.name = newName }
             rebuildGridFromState(s)
-            folderVersion += 1  // refresh folder icons
+            Task { await IconCache.shared.invalidateFolder(folderID: folder.id.uuidString) }
+            folderVersion += 1
         }
     }
     private func removeAppFromFolder(_ app: AppItem) {
@@ -762,7 +791,14 @@ struct LaunchpadView: View {
         }
         PersistenceManager.save(s)
         rebuildGridFromState(s)
-        folderVersion += 1  // refresh folder icons
+        // Invalidate affected folder previews
+        for fid in rm.keys {
+            Task { await IconCache.shared.invalidateFolder(folderID: fid.uuidString) }
+        }
+        if let ef = expandedFolder {
+            Task { await IconCache.shared.invalidateFolder(folderID: ef.id.uuidString) }
+        }
+        folderVersion += 1
         if let ef = expandedFolder, rm.keys.contains(ef.id) { closeFolder() }
         else if let ef = expandedFolder, let u = s.folders[ef.id] {
             expandedFolder = u
@@ -780,6 +816,7 @@ struct LaunchpadView: View {
         s.folders[folderID] = f
         PersistenceManager.save(s)
         rebuildGridFromState(s)
+        Task { await IconCache.shared.invalidateFolder(folderID: folderID.uuidString) }
         folderVersion += 1
         // Keep the expanded folder in sync
         if expandedFolder?.id == folderID {

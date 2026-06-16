@@ -8,6 +8,7 @@
         "/^cd /Users/mariussuflea/work-local/open-launchpad && python3 << 'PYEOF'\npath = \"Sources/OpenLaunchpad/Views/LaunchpadView\\.swift\"\nwith open\\(path, \"r\"\\) as f:\n    content = f\\.read\\(\\)\n\n# Fix var hidden → let hidden\ncontent = content\\.replace\\(\"var hidden: Set<String> = \\[\\]\", \"let hidden: Set<String> = \\[\\]\"\\)\n\n# Fix unreachable default\ncontent = content\\.replace\\(\"\"\"        case \\.folder\\(var targetFolder, _\\):\n            if !targetFolder\\.appIDs\\.contains\\(draggedID\\) \\{\n                targetFolder\\.appIDs\\.append\\(draggedID\\)\n                folderMap\\[targetFolder\\.id\\] = targetFolder\n            \\}\n            orderedIDs\\.removeAll \\{ \\$0 == draggedID \\}\n\n        default: break\n        \\}\"\"\", \"\"\"        case \\.folder\\(var targetFolder, _\\):\n            if !targetFolder\\.appIDs\\.contains\\(draggedID\\) \\{\n                targetFolder\\.appIDs\\.append\\(draggedID\\)\n                folderMap\\[targetFolder\\.id\\] = targetFolder\n            \\}\n            orderedIDs\\.removeAll \\{ \\$0 == draggedID \\}\n        \\}\"\"\"\\)\n\nwith open\\(path, \"w\"\\) as f:\n    f\\.write\\(content\\)\nprint\\(\"Warnings fixed\"\\)\nPYEOF\nswift build 2>&1 \\| tail -3$/": {
             "approve": true,
             "matchCommandLine": true
-        }
+        },
+        "/usr/bin/swift": true
     }
 }

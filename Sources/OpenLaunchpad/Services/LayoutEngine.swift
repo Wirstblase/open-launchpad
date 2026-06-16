@@ -80,4 +80,40 @@ enum LayoutEngine {
         guard start < items.count else { return [] }
         return Array(items[start..<end])
     }
+
+    // MARK: - Grid Frame Pre-computation
+
+    /// Pre-computed frame for a single grid cell, used for hit-testing (long-press monitor).
+    struct GridFrame {
+        let id: String
+        let frame: CGRect
+    }
+
+    /// Computes all grid cell frames for all pages in local coordinate space.
+    /// Call this ONCE when layout or items change — NOT in the view body.
+    static func computeGridFrames(
+        pages: [[LaunchpadItem]],
+        layout: GridLayout,
+        screenWidth: CGFloat,
+        gridTop: CGFloat = 100
+    ) -> [(id: String, frame: CGRect)] {
+        let cellWidth = layout.iconSize + 20
+        let cellHeight = layout.iconSize + 34
+        let colStep = cellWidth + layout.columnSpacing
+        let rowStep = cellHeight + layout.rowSpacing
+        let totalGridWidth = CGFloat(layout.columns) * cellWidth + CGFloat(layout.columns - 1) * layout.columnSpacing
+        let xPadding = max(0, (screenWidth - totalGridWidth) / 2)
+
+        var frames: [(id: String, frame: CGRect)] = []
+        for page in pages {
+            for (i, item) in page.enumerated() {
+                let col = CGFloat(i % layout.columns)
+                let row = CGFloat(i / layout.columns)
+                let x = xPadding + col * colStep
+                let y = gridTop + row * rowStep
+                frames.append((id: item.id, frame: CGRect(x: x, y: y, width: cellWidth, height: cellHeight)))
+            }
+        }
+        return frames
+    }
 }
