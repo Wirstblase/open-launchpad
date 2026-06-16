@@ -108,10 +108,21 @@ enum AppScanner {
             return !knownIDs.contains(id)
         }
 
-        // Append newly discovered apps that aren't in the saved order
+        // Collect all app IDs that live inside folders so we don't append
+        // them as standalone items when scanning for newly discovered apps.
+        var appsInFolders = Set<String>()
+        for (_, folder) in folders {
+            appsInFolders.formUnion(folder.appIDs)
+        }
+
+        // Append newly discovered apps that aren't in the saved order,
+        // aren't hidden, and aren't already contained inside a folder.
         let existingOrderedSet = Set(orderedIDs)
         for app in apps {
-            if !existingOrderedSet.contains(app.id) && !hiddenIDs.contains(app.id) {
+            if !existingOrderedSet.contains(app.id)
+                && !hiddenIDs.contains(app.id)
+                && !appsInFolders.contains(app.id)
+            {
                 orderedIDs.append(app.id)
             }
         }

@@ -124,7 +124,8 @@ struct LaunchpadView: View {
                         onClose: { closeFolder() },
                         onRename: { renameFolder(folder, newName: $0) },
                         onLaunchApp: { launchApp($0) },
-                        onRemoveApp: { removeAppFromFolder($0) }
+                        onRemoveApp: { removeAppFromFolder($0) },
+                        onReorder: { reorderAppsInFolder(folderID: folder.id, appIDs: $0) }
                     ).transition(.opacity.combined(with: .scale(scale: 0.85)))
                 }
             }
@@ -287,7 +288,11 @@ struct LaunchpadView: View {
                         .opacity(dragging ? 0.01 : 1.0)
                         .onDrop(of: [.text], delegate: DragRelocateDelegate(
                             item: item, items: $gridItems, draggedItemID: $draggedItemID,
-                            hoveredMergeTargetID: $hoveredMergeTargetID, iconSize: layout.iconSize, onChanged: saveLayout))
+                            hoveredMergeTargetID: $hoveredMergeTargetID, iconSize: layout.iconSize,
+                            onChanged: saveLayout,
+                            onMerge: { draggedID, target in
+                                mergeItems(draggedID: draggedID, into: target)
+                            }))
                         .opacity(isAnimatingIn ? 1.0 : 0.0)
                         .scaleEffect(isAnimatingIn ? 1.0 : 1.15)
                         .animation(.easeOut(duration: 0.3).delay(Double(gi) * 0.012), value: isAnimatingIn)
@@ -428,6 +433,9 @@ struct LaunchpadView: View {
             editDragState = state
         }
 
+        // Show merge-target glow when hovering near the center of another cell
+        updateMergeTargetHighlight(loc: loc, layout: layout, sw: sw)
+
         // Edge proximity detection for page flip
         let edgeWidth: CGFloat = 70
         let cooldown: TimeInterval = 0.55
@@ -480,6 +488,7 @@ struct LaunchpadView: View {
 
         // Did the user drop near the CENTER of the target cell?
         // If so, merge into folder. Otherwise, reorder.
+        // Folders cannot be merged — they are only reordered.
         let cellWidth = layout.iconSize + 20
         let cellHeight = layout.iconSize + 34
         let colStep = cellWidth + layout.columnSpacing
@@ -492,8 +501,10 @@ struct LaunchpadView: View {
         let dx = abs(loc.x - cellCenterX)
         let dy = abs(loc.y - cellCenterY)
         let isNearCenter = dx < cellWidth * 0.35 && dy < cellHeight * 0.35
+        let isDraggingFolder = state.item.id.hasPrefix("folder-")
 
         if isNearCenter,
+           !isDraggingFolder,
            clampedTarget < gridItems.count,
            gridItems[clampedTarget].id != state.item.id {
             // Merge into folder (dropped ON another icon)
@@ -510,7 +521,48 @@ struct LaunchpadView: View {
         withAnimation(.easeOut(duration: 0.2)) {
             editDragState = nil
             draggedItemID = nil
+            hoveredMergeTargetID = nil
             edgeFlipDirection = 0
+        }
+    }
+
+    /// Updates `hoveredMergeTargetID` during edit-mode drag so the target cell
+    /// shows a green glow when the dragged app is near its center — indicating
+    /// that releasing the click will create/expand a folder.
+    private func updateMergeTargetHighlight(loc: CGPoint, layout: LayoutEngine.GridLayout, sw: CGFloat) {
+        guard let state = editDragState, !state.item.id.hasPrefix("folder-") else {
+            if hoveredMergeTargetID != nil {
+                withAnimation(.easeOut(duration: 0.2)) { hoveredMergeTargetID = nil }
+            }
+            return
+        }
+
+        let (col, row) = gridCellFromPoint(loc, layout: layout, sw: sw)
+        let tGlobal = currentPage * layout.itemsPerPage + (row * layout.columns + col)
+
+        guard tGlobal < gridItems.count, tGlobal != state.sourceGlobalIndex else {
+            if hoveredMergeTargetID != nil {
+                withAnimation(.easeOut(duration: 0.2)) { hoveredMergeTargetID = nil }
+            }
+            return
+        }
+
+        let cellWidth = layout.iconSize + 20
+        let cellHeight = layout.iconSize + 34
+        let colStep = cellWidth + layout.columnSpacing
+        let rowStep = cellHeight + layout.rowSpacing
+        let totalGridWidth = CGFloat(layout.columns) * cellWidth + CGFloat(layout.columns - 1) * layout.columnSpacing
+        let xPad = max(0, (sw - totalGridWidth) / 2)
+
+        let cx = xPad + CGFloat(col) * colStep + cellWidth / 2
+        let cy = CGFloat(row) * rowStep + cellHeight / 2
+        let nearCenter = abs(loc.x - cx) < cellWidth * 0.35 && abs(loc.y - cy) < cellHeight * 0.35
+
+        let tid = gridItems[tGlobal].id
+        if nearCenter, hoveredMergeTargetID != tid {
+            withAnimation(.easeOut(duration: 0.2)) { hoveredMergeTargetID = tid }
+        } else if !nearCenter, hoveredMergeTargetID == tid {
+            withAnimation(.easeOut(duration: 0.2)) { hoveredMergeTargetID = nil }
         }
     }
 
@@ -534,7 +586,11 @@ struct LaunchpadView: View {
     // MARK: - Folder Merging
 
     /// Merges a dragged item into a target item, creating or expanding a folder.
+    /// Folders cannot be merged into other items — they are only reordered.
     private func mergeItems(draggedID: String, into target: LaunchpadItem) {
+        // Guard: never merge a folder into another item
+        guard !draggedID.hasPrefix("folder-") else { return }
+
         var fm: [UUID: AppFolder] = [:]
         for case .folder(let f, _) in gridItems { fm[f.id] = f }
 
@@ -710,6 +766,24 @@ struct LaunchpadView: View {
         }
     }
 
+    /// Updates the app order within a folder.
+    private func reorderAppsInFolder(folderID: UUID, appIDs: [String]) {
+        var s = currentLayoutState()
+        guard var f = s.folders[folderID] else { return }
+        // Only accept the new order if it contains the same set of apps
+        guard Set(f.appIDs) == Set(appIDs) else { return }
+        f.appIDs = appIDs
+        s.folders[folderID] = f
+        PersistenceManager.save(s)
+        rebuildGridFromState(s)
+        folderVersion += 1
+        // Keep the expanded folder in sync
+        if expandedFolder?.id == folderID {
+            expandedFolder = f
+            expandedFolderApps = appIDs.compactMap { aid in allApps.first(where: { $0.id == aid }) }
+        }
+    }
+
     /// Rebuilds gridItems from a LayoutState (bypasses disk I/O).
     private func rebuildGridFromState(_ state: LayoutState) {
         let appsByID = Dictionary(allApps.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -775,41 +849,82 @@ struct LaunchpadView: View {
 
 // MARK: - Drag Relocate Delegate
 struct DragRelocateDelegate: DropDelegate {
-    let item: LaunchpadItem; @Binding var items: [LaunchpadItem]; @Binding var draggedItemID: String?
-    @Binding var hoveredMergeTargetID: String?; let iconSize: CGFloat; let onChanged: () -> Void
+    let item: LaunchpadItem
+    @Binding var items: [LaunchpadItem]
+    @Binding var draggedItemID: String?
+    @Binding var hoveredMergeTargetID: String?
+    let iconSize: CGFloat
+    let onChanged: () -> Void
+    /// Called when the user drops onto a target to create/expand a folder.
+    /// The parent view handles the actual merge and calls onChanged afterwards.
+    let onMerge: (String, LaunchpadItem) -> Void
+
     func dropEntered(info: DropInfo) { check(info) }
     func dropUpdated(info: DropInfo) -> DropProposal? { check(info); return DropProposal(operation: .move) }
-    func dropExited(info: DropInfo) { if hoveredMergeTargetID == item.id { withAnimation(.easeOut(duration: 0.2)) { hoveredMergeTargetID = nil } } }
+    func dropExited(info: DropInfo) {
+        if hoveredMergeTargetID == item.id {
+            withAnimation(.easeOut(duration: 0.2)) { hoveredMergeTargetID = nil }
+        }
+    }
     func performDrop(info: DropInfo) -> Bool {
         guard let d = draggedItemID else { return false }
-        if hoveredMergeTargetID == item.id { merge(d, item); return true }
-        if let fi = items.firstIndex(where: { $0.id == d }), let ti = items.firstIndex(where: { $0.id == item.id }), fi != ti {
-            withAnimation(.easeOut(duration: 0.25)) { items.move(fromOffsets: IndexSet(integer: fi), toOffset: ti > fi ? ti + 1 : ti) }
+        // Guard: never merge a folder into another item
+        guard !d.hasPrefix("folder-") else {
+            withAnimation(.easeOut(duration: 0.25)) { draggedItemID = nil; hoveredMergeTargetID = nil }
+            return false
         }
-        withAnimation(.easeOut(duration: 0.25)) { draggedItemID = nil; hoveredMergeTargetID = nil }; onChanged(); return true
-    }
-    private func check(_ info: DropInfo) {
-        guard draggedItemID != nil, draggedItemID != item.id else { return }
-        let cw = iconSize + 20; let ch = iconSize + 40; let l = info.location; let mx = cw * 0.2; let my = ch * 0.2
-        if l.x > mx && l.x < cw - mx && l.y > my && l.y < ch - my {
-            if hoveredMergeTargetID != item.id { withAnimation(.easeOut(duration: 0.2)) { hoveredMergeTargetID = item.id } }
-        } else {
-            if hoveredMergeTargetID == item.id { withAnimation(.easeOut(duration: 0.2)) { hoveredMergeTargetID = nil } }
-            if let d = draggedItemID, let fi = items.firstIndex(where: { $0.id == d }), let ti = items.firstIndex(where: { $0.id == item.id }), fi != ti {
-                withAnimation(.easeOut(duration: 0.25)) { items.move(fromOffsets: IndexSet(integer: fi), toOffset: ti > fi ? ti + 1 : ti) }
+        if hoveredMergeTargetID == item.id {
+            onMerge(d, item)
+            return true
+        }
+        if let fi = items.firstIndex(where: { $0.id == d }),
+           let ti = items.firstIndex(where: { $0.id == item.id }),
+           fi != ti
+        {
+            withAnimation(.easeOut(duration: 0.25)) {
+                items.move(fromOffsets: IndexSet(integer: fi),
+                           toOffset: ti > fi ? ti + 1 : ti)
             }
         }
+        withAnimation(.easeOut(duration: 0.25)) { draggedItemID = nil; hoveredMergeTargetID = nil }
+        onChanged()
+        return true
     }
-    private func merge(_ dragged: String, _ target: LaunchpadItem) {
-        var fm: [UUID: AppFolder] = [:]; for case .folder(let f, _) in items { fm[f.id] = f }
-        var o = items.map { $0.id }
-        switch target {
-        case .app(let ta): let nf = AppFolder(name: "New Folder", appIDs: [ta.id, dragged]); fm[nf.id] = nf; let fid = "folder-\(nf.id.uuidString)"; if let ti = o.firstIndex(of: ta.id) { o.insert(fid, at: ti) } else { o.append(fid) }; o.removeAll { $0 == dragged || $0 == ta.id }
-        case .folder(var tf, _): if !tf.appIDs.contains(dragged) { tf.appIDs.append(dragged); fm[tf.id] = tf }; o.removeAll { $0 == dragged }
+    private func check(_ info: DropInfo) {
+        guard let d = draggedItemID, d != item.id else { return }
+        // Never try to merge folders — only allow reorder
+        guard !d.hasPrefix("folder-") else {
+            if let fi = items.firstIndex(where: { $0.id == d }),
+               let ti = items.firstIndex(where: { $0.id == item.id }),
+               fi != ti
+            {
+                withAnimation(.easeOut(duration: 0.25)) {
+                    items.move(fromOffsets: IndexSet(integer: fi),
+                               toOffset: ti > fi ? ti + 1 : ti)
+                }
+            }
+            return
         }
-        var ni: [LaunchpadItem] = []
-        for id in o { if id.hasPrefix("folder-"), let fid = UUID(uuidString: String(id.dropFirst(7))), let f = fm[fid] { ni.append(.folder(f, [])) } else if let ex = items.first(where: { $0.id == id }) { ni.append(ex) } }
-        withAnimation(.easeOut(duration: 0.25)) { items = ni; draggedItemID = nil; hoveredMergeTargetID = nil }; onChanged()
+        let cw = iconSize + 20; let ch = iconSize + 40
+        let l = info.location; let mx = cw * 0.2; let my = ch * 0.2
+        if l.x > mx && l.x < cw - mx && l.y > my && l.y < ch - my {
+            if hoveredMergeTargetID != item.id {
+                withAnimation(.easeOut(duration: 0.2)) { hoveredMergeTargetID = item.id }
+            }
+        } else {
+            if hoveredMergeTargetID == item.id {
+                withAnimation(.easeOut(duration: 0.2)) { hoveredMergeTargetID = nil }
+            }
+            if let fi = items.firstIndex(where: { $0.id == d }),
+               let ti = items.firstIndex(where: { $0.id == item.id }),
+               fi != ti
+            {
+                withAnimation(.easeOut(duration: 0.25)) {
+                    items.move(fromOffsets: IndexSet(integer: fi),
+                               toOffset: ti > fi ? ti + 1 : ti)
+                }
+            }
+        }
     }
 }
 

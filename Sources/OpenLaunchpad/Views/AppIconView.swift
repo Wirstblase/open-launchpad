@@ -40,7 +40,7 @@ struct AppIconView: View {
 
                 // Merge target glow (dragging app onto this one for folder creation)
                 RoundedRectangle(cornerRadius: iconCornerRadius + 3)
-                    .stroke(Color.green.opacity(0.85), lineWidth: 3)
+                    .stroke(Color.white.opacity(0.85), lineWidth: 3)
                     .frame(width: iconSize + 8, height: iconSize + 8)
                     .scaleEffect(1.12)
                     .opacity(isMergeTarget ? 1.0 : 0.0)
