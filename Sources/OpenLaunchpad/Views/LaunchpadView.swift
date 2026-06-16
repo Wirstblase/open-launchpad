@@ -151,15 +151,13 @@ struct LaunchpadView: View {
                 switch phase {
                 case "changed":
                     if let delta = n.userInfo?["delta"] as? CGFloat {
-                        let sw = geo.size.width
-                        // Clamp with rubber-banding at edges
-                        let projected = delta * 0.5
-                        if currentPage == 0 && projected > 0 {
-                            dragOffset = projected * 0.35
-                        } else if currentPage == pageCount - 1 && projected < 0 {
-                            dragOffset = projected * 0.35
+                        // Track fingers 1:1; apply rubber-banding at first/last page
+                        if currentPage == 0 && delta > 0 {
+                            dragOffset = delta * 0.25
+                        } else if currentPage == pageCount - 1 && delta < 0 {
+                            dragOffset = delta * 0.25
                         } else {
-                            dragOffset = projected
+                            dragOffset = delta
                         }
                     }
 
@@ -670,7 +668,7 @@ struct LaunchpadView: View {
         let gridTop: CGFloat = 100  // search bar + spacer
 
         var frames: [(id: String, frame: CGRect)] = []
-        for (pi, page) in pages.enumerated() {
+        for (_, page) in pages.enumerated() {
             for (i, item) in page.enumerated() {
                 let col = CGFloat(i % layout.columns)
                 let row = CGFloat(i / layout.columns)

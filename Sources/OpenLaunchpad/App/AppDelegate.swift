@@ -5,6 +5,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private var window: LaunchpadWindow?
     private var keyMonitor: Any?
+    private var scrollMonitor: Any?
+    private var mouseDownMonitor: Any?
+    private var mouseUpMonitor: Any?
     private var hotkeyManager: HotkeyManager?
     private var appWatcher: AppDirectoryWatcher?
 
@@ -23,6 +26,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         if let monitor = keyMonitor { NSEvent.removeMonitor(monitor); keyMonitor = nil }
+        if let monitor = scrollMonitor { NSEvent.removeMonitor(monitor); scrollMonitor = nil }
+        if let monitor = mouseDownMonitor { NSEvent.removeMonitor(monitor); mouseDownMonitor = nil }
+        if let monitor = mouseUpMonitor { NSEvent.removeMonitor(monitor); mouseUpMonitor = nil }
         GestureManager.shared.stop()
         hotkeyManager = nil
         appWatcher?.stop()
@@ -85,7 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var mouseHoldTimer: Timer?
 
     private func setupMouseHoldMonitor() {
-        NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+        mouseDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
             guard let self = self, let window = self.window, window.isVisible else { return event }
             guard let layout = AppDelegate.currentGridLayoutInfo, layout.isVisible else { return event }
 
@@ -110,7 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return event
         }
 
-        NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+        mouseUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
             self?.mouseHoldTimer?.invalidate()
             self?.mouseHoldTimer = nil
             return event
@@ -120,21 +126,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: - Trackpad Swipe Monitor
 
     private var scrollAccumulator: CGFloat = 0
+    private var scrollVelocity: CGFloat = 0   // estimated px/frame for flick detection
 
     private func setupScrollMonitor() {
-        NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
             guard let self = self, self.window?.isVisible == true else { return event }
             guard event.hasPreciseScrollingDeltas else { return event }
             guard let fr = self.window?.firstResponder,
                   !(fr is NSTextView || fr is NSTextField) else { return event }
 
-            self.scrollAccumulator += event.scrollingDeltaX
+            let dx = event.scrollingDeltaX
 
             switch event.phase {
             case .began:
-                self.scrollAccumulator = event.scrollingDeltaX
+                self.scrollAccumulator = dx
+                self.scrollVelocity = dx
 
             case .changed:
+                self.scrollAccumulator += dx
+                // Exponential moving average of per-frame deltas for velocity
+                self.scrollVelocity = self.scrollVelocity * 0.6 + dx * 0.4
                 // Live tracking — post intermediate position for bounce preview
                 NotificationCenter.default.post(
                     name: .launchpadPageSwipe, object: nil,
@@ -142,10 +153,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
             case .ended, .cancelled:
                 let delta = self.scrollAccumulator
+                let vel = self.scrollVelocity
                 self.scrollAccumulator = 0
-                // Threshold: need > 150pt swipe to change page, otherwise bounce back
-                if abs(delta) > 150 {
-                    let direction: Int = delta > 0 ? -1 : 1
+                self.scrollVelocity = 0
+                // Trigger page change on distance threshold OR fast flick (>30 px/frame)
+                if abs(delta) > 120 || abs(vel) > 30 {
+                    let direction: Int = (delta != 0 ? delta : vel) > 0 ? -1 : 1
                     NotificationCenter.default.post(
                         name: .launchpadPageSwipe, object: nil,
                         userInfo: ["phase": "committed", "direction": direction])
