@@ -3,7 +3,8 @@
 Did you just update to Mac OS 26.x and got mega frustrated that they removed the Launchpad?
 Here's a drop in replacement (kinda, work in progress)
 
-OpenLaunchpad - A free, open-source clone of the classic macOS Launchpad (Sequoia 15.7.4 ish style). Built because macOS 26 Tahoe replaced the full-screen app grid with a Spotlight drawer hideous thing integrated in the search, (don't get me started about the search).
+OpenLaunchpad: A free, open-source clone of the classic macOS Launchpad (Sequoia 15.7.4 ish style). 
+Built because macOS 26 Tahoe replaced the fullscreen grid with a hideous Spotlight-drawer-thing integrated in search, (don't get me started about the search).
 
 ## Build and run
 
@@ -49,6 +50,10 @@ Launch frequency stats are kept in `UserDefaults` under the key `OpenLaunchpadLa
 - Auto-detects newly installed apps while running
 - Layout persists across launches
 - Clickable page indicator dots
+
+## Contributors
+
+Pls contribute:D Feel free to fork and open a PR if you have any suggestions.
 
 ## License
 
